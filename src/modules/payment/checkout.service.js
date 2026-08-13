@@ -15,6 +15,8 @@ import {
 } from '../../shared/constants/enum.constant.js';
 import { normalizeGstin } from '../../shared/utils/gstin.util.js';
 import { CheckoutSessionModel } from './checkout-session.model.js';
+import { NotificationModel } from '../notification/notification.model.js';
+import { UserModel } from '../user/user.model.js';
 
 export class CheckoutService extends BaseService {
   constructor({
@@ -47,16 +49,39 @@ export class CheckoutService extends BaseService {
    * DB writes run in a MongoDB ACID transaction.
    */
   async createCheckoutSession(payload) {
-    const customer = this.#normalizeCustomer(payload);
     const plan = await this.subscriptionRepository.findPlanById(payload.planId);
     if (!plan || plan.status !== PlanStatus.ACTIVE) {
       this.throwBadRequest('Active subscription plan not found');
     }
 
-    const amount = Number(plan.totalPrice);
+    // ── PARTIAL PAYMENT PATH (Pay Remaining Balance) ─────────────────────────
+    // Skip #normalizeCustomer validation (address/pincode not required for balance pays)
+    if (payload.existingSubscriptionId) {
+      return this.#createPartialPaymentSession(payload, plan);
+    }
+
+    // ── FULL / CUSTOM NEW CHECKOUT PATH ──────────────────────────────────────
+    const customer = this.#normalizeCustomer(payload);
+
+    // Auto-detect if existing customer already has an ACTIVE subscription with outstanding balance
+    if (!payload.existingSubscriptionId && customer.phone) {
+      const existingUser = await this.userRepository.findByPhone(customer.phone);
+      if (existingUser) {
+        const activeSub = await this.subscriptionRepository.findActiveSubscriptionByClient(existingUser._id);
+        if (activeSub && (activeSub.remainingAmount || 0) > 0) {
+          payload.existingSubscriptionId = (activeSub._id || activeSub.id).toString();
+          return this.#createPartialPaymentSession(payload, plan);
+        }
+      }
+    }
+
+    const fullPlanPrice = Number(plan.totalPrice);
+    const customAmountNum = payload.customAmount ? Number(payload.customAmount) : 0;
+    const amount = customAmountNum > 0 ? customAmountNum : fullPlanPrice;
     if (!(amount > 0)) {
       this.throwBadRequest('Plan price is invalid');
     }
+    const remainingAmount = Math.max(0, Math.round((fullPlanPrice - amount) * 100) / 100);
     const amountPaise = Math.round(amount * 100);
     const sessionId = randomUUID().replace(/-/g, '');
     const ttlMin = env.CHECKOUT_SESSION_TTL_MINUTES || 30;
@@ -126,6 +151,10 @@ export class CheckoutService extends BaseService {
           packageTier: plan.packageTier,
           cameraCount: plan.maxCameras,
           monthlyCharge,
+          totalPlanPrice: fullPlanPrice,
+          paidAmount: amount,
+          remainingAmount,
+          durationInMonths: months,
           contractStartDate: startDate,
           renewalDate,
           autoRenewal: plan.autoRenewalSupported !== false,
@@ -140,6 +169,8 @@ export class CheckoutService extends BaseService {
           subscriptionId: subscription._id || subscription.id,
           checkoutSessionId: sessionId,
           amount,
+          planTotalPrice: fullPlanPrice,
+          remainingAmount,
           amountPaise,
           currency: 'INR',
           method: PaymentMethod.GATEWAY,
@@ -169,6 +200,9 @@ export class CheckoutService extends BaseService {
             paymentTransactionId: payment._id || payment.id,
             customer,
             amount,
+            planTotalPrice: fullPlanPrice,
+            remainingAmount,
+            durationInMonths: months,
             amountPaise,
             currency: 'INR',
             razorpayOrderId: order.id,
@@ -204,6 +238,9 @@ export class CheckoutService extends BaseService {
       orderId: order.id,
       amount,
       amountPaise,
+      planTotalPrice: fullPlanPrice,
+      remainingAmount,
+      durationInMonths: months,
       currency: 'INR',
       keyId: pub.keyId,
       expiresAt,
@@ -220,6 +257,144 @@ export class CheckoutService extends BaseService {
         name: plan.name,
         packageTier: plan.packageTier,
         billingCycle: plan.billingCycle,
+        totalPrice: fullPlanPrice,
+        durationInMonths: months,
+      },
+    };
+  }
+
+  /**
+   * Partial payment session for "Pay Remaining Balance" from client portal.
+   * Reuses the existing subscription — does NOT create a new one.
+   */
+  async #createPartialPaymentSession(payload, plan) {
+    const existingSubId = payload.existingSubscriptionId;
+    const existingSub = await this.subscriptionRepository.findSubscriptionById(existingSubId);
+    if (!existingSub) {
+      this.throwNotFound('Subscription');
+    }
+
+    const remaining = Number(existingSub.remainingAmount || 0);
+    if (remaining <= 0) {
+      this.throwBadRequest('No outstanding balance to pay on this subscription');
+    }
+
+    const customAmountNum = Number(payload.customAmount);
+    const amount = (customAmountNum > 0 && customAmountNum <= remaining)
+      ? Math.round(customAmountNum * 100) / 100
+      : remaining;
+
+    const remainingAfterPayment = Math.max(0, Math.round((remaining - amount) * 100) / 100);
+    const fullPlanPrice = Number(existingSub.totalPlanPrice || plan.totalPrice);
+    const amountPaise = Math.round(amount * 100);
+    const sessionId = randomUUID().replace(/-/g, '');
+    const ttlMin = env.CHECKOUT_SESSION_TTL_MINUTES || 30;
+    const expiresAt = new Date(Date.now() + ttlMin * 60 * 1000);
+
+    const order = await this.razorpayService.createOrder({
+      amountPaise,
+      currency: 'INR',
+      receipt: `bal_${sessionId.slice(0, 18)}`,
+      notes: { sessionId, subscriptionId: existingSubId, type: 'BALANCE_PAYMENT' },
+    });
+
+    const receiptNo = await this.#generateReceiptNo();
+
+    // Resolve client from existing subscription (clientId = userId reference)
+    const userId = existingSub.clientId;
+    const client = await this.clientRepository.findByUserId(userId);
+    if (!client) {
+      this.throwNotFound('Client profile for this subscription');
+    }
+
+    // Build customer snapshot from client profile (no strict validation needed)
+    const userRef = client.userId && typeof client.userId === 'object' ? client.userId : null;
+    const installAddr = client.installationAddress || {};
+    const customer = {
+      name: userRef?.name || payload.name || 'Client',
+      phone: userRef?.phone || payload.phone || '0000000000',
+      email: userRef?.email || payload.email || '',
+      businessName: client.businessName || payload.businessName || 'Business',
+      address: installAddr.address || payload.address || 'N/A',
+      city: installAddr.city || payload.city || 'N/A',
+      pincode: installAddr.pincode || payload.pincode || '000000',
+      state: installAddr.state || payload.state || 'Madhya Pradesh',
+      gstin: client.gstin || '',
+    };
+
+    const payment = await this.paymentRepository.create({
+      clientId: client._id || client.id,
+      subscriptionId: existingSubId,
+      checkoutSessionId: sessionId,
+      amount,
+      planTotalPrice: fullPlanPrice,
+      remainingAmount: remainingAfterPayment,
+      amountPaise,
+      currency: 'INR',
+      method: PaymentMethod.GATEWAY,
+      status: PaymentStatus.PENDING,
+      paidAt: null,
+      receiptNo,
+      razorpayOrderId: order.id,
+      note: `Balance payment for subscription ${existingSubId}`,
+    });
+
+    await CheckoutSessionModel.create({
+      sessionId,
+      planId: existingSub.planId || plan._id,
+      clientId: client._id || client.id,
+      userId,
+      subscriptionId: existingSubId,
+      existingSubscriptionId: existingSubId,
+      paymentTransactionId: payment._id || payment.id,
+      customer,
+      amount,
+      planTotalPrice: fullPlanPrice,
+      remainingAmount: remainingAfterPayment,
+      durationInMonths: existingSub.durationInMonths || plan.durationInMonths || 1,
+      amountPaise,
+      currency: 'INR',
+      razorpayOrderId: order.id,
+      status: CheckoutSessionStatus.PENDING,
+      expiresAt,
+    });
+
+    try {
+      await this.redisService.set(
+        `checkout:session:${sessionId}`,
+        { sessionId, status: CheckoutSessionStatus.PENDING },
+        ttlMin * 60,
+      );
+    } catch { /* Redis optional */ }
+
+    const pub = this.razorpayService.getPublicConfig();
+    return {
+      sessionId,
+      orderId: order.id,
+      amount,
+      amountPaise,
+      planTotalPrice: fullPlanPrice,
+      remainingAmount: 0,
+      durationInMonths: existingSub.durationInMonths || plan.durationInMonths || 1,
+      currency: 'INR',
+      keyId: pub.keyId,
+      expiresAt,
+      subscriptionId: existingSubId,
+      paymentId: (payment._id || payment.id)?.toString(),
+      receiptNo,
+      isBalancePayment: true,
+      prefill: {
+        name: customer.name,
+        email: customer.email || '',
+        contact: customer.phone,
+      },
+      plan: {
+        id: String(plan._id || plan.id),
+        name: plan.name,
+        packageTier: plan.packageTier,
+        billingCycle: plan.billingCycle,
+        totalPrice: fullPlanPrice,
+        durationInMonths: existingSub.durationInMonths || plan.durationInMonths || 1,
       },
     };
   }
@@ -282,14 +457,36 @@ export class CheckoutService extends BaseService {
         { session },
       );
 
-      await this.subscriptionRepository.updateSubscription(
-        checkout.subscriptionId.toString(),
-        {
-          status: SubscriptionStatus.ACTIVE,
-          lastPaymentDate: paidAt,
-        },
-        { session },
-      );
+      const isBalancePayment = !!checkout.existingSubscriptionId;
+      const subscriptionId = checkout.subscriptionId.toString();
+
+      if (isBalancePayment) {
+        // Update existing subscription's paidAmount and recalculate remainingAmount accurately
+        const existingSub = await this.subscriptionRepository.findSubscriptionById(subscriptionId);
+        const totalPlanPrice = Number(existingSub?.totalPlanPrice || checkout.planTotalPrice || 0);
+        const newPaidAmount = Math.round((Number(existingSub?.paidAmount || 0) + Number(checkout.amount)) * 100) / 100;
+        const newRemainingAmount = Math.max(0, Math.round((totalPlanPrice - newPaidAmount) * 100) / 100);
+
+        await this.subscriptionRepository.updateSubscription(
+          subscriptionId,
+          {
+            paidAmount: newPaidAmount,
+            remainingAmount: newRemainingAmount,
+            lastPaymentDate: paidAt,
+            status: SubscriptionStatus.ACTIVE,
+          },
+          { session },
+        );
+      } else {
+        await this.subscriptionRepository.updateSubscription(
+          subscriptionId,
+          {
+            status: SubscriptionStatus.ACTIVE,
+            lastPaymentDate: paidAt,
+          },
+          { session },
+        );
+      }
 
       await this.clientRepository.updateStatus(
         checkout.clientId.toString(),
@@ -345,11 +542,15 @@ export class CheckoutService extends BaseService {
         { session },
       );
 
-      await this.subscriptionRepository.updateSubscription(
-        checkout.subscriptionId.toString(),
-        { status: SubscriptionStatus.CANCELLED },
-        { session },
-      );
+      // Only cancel the subscription if it is NOT a balance payment on an existing sub
+      const isBalancePayment = !!checkout.existingSubscriptionId;
+      if (!isBalancePayment) {
+        await this.subscriptionRepository.updateSubscription(
+          checkout.subscriptionId.toString(),
+          { status: SubscriptionStatus.CANCELLED },
+          { session },
+        );
+      }
 
       checkout.status = CheckoutSessionStatus.FAILED;
       checkout.failureReason = failureReason;
@@ -391,6 +592,9 @@ export class CheckoutService extends BaseService {
       sessionId: checkout.sessionId,
       status: checkout.status,
       amount: checkout.amount,
+      planTotalPrice: checkout.planTotalPrice,
+      remainingAmount: checkout.remainingAmount,
+      durationInMonths: checkout.durationInMonths,
       amountPaise: checkout.amountPaise,
       currency: checkout.currency,
       orderId: checkout.razorpayOrderId,
@@ -495,26 +699,55 @@ export class CheckoutService extends BaseService {
         }
       }
 
-      await this.postPaymentQueueService.addAdminNotificationJob({
-        paymentId,
-        clientId,
-        amount,
-        receiptNo: `RCPT-${sessionId?.slice(0, 8) || 'ONLINE'}`,
-        planName,
-        sessionId,
-        customerName: customer.name,
-        businessName: customer.businessName
-      });
+      // Create in-app admin notifications directly in MongoDB
+      try {
+        const admins = await UserModel.find({
+          role: { $in: ['SUPER_ADMIN', 'ADMIN', 'ACCOUNTS_MANAGER', 'OPERATIONS_TEAM'] },
+          status: 'ACTIVE',
+        }).select('_id').lean().exec();
 
-      await this.postPaymentQueueService.addInvoicePipelineJob({
-        paymentId,
-        clientId,
-        subscriptionId,
-        amount,
-        planName,
-        sessionId,
-        customer
-      });
+        if (admins.length > 0) {
+          const displayName = customer.businessName || customer.name || 'Website Client';
+          const formattedAmount = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount);
+          const notifications = admins.map((admin) => ({
+            recipient: admin._id,
+            title: 'Website Payment Received',
+            message: `${displayName} paid ${formattedAmount} via Razorpay Online for plan "${planName}"`,
+            type: 'PAYMENT',
+            priority: 'HIGH',
+            channel: 'IN_APP',
+            actionUrl: `/payments/${paymentId}`,
+            metadata: { paymentId, clientId, amount, planName, sessionId },
+            isRead: false,
+          }));
+          await NotificationModel.insertMany(notifications, { ordered: false }).catch(() => {});
+        }
+      } catch (directNotifErr) {
+        // Direct notification best-effort
+      }
+
+      if (this.postPaymentQueueService) {
+        await this.postPaymentQueueService.addAdminNotificationJob({
+          paymentId,
+          clientId,
+          amount,
+          receiptNo: `RCPT-${sessionId?.slice(0, 8) || 'ONLINE'}`,
+          planName,
+          sessionId,
+          customerName: customer.name,
+          businessName: customer.businessName
+        }).catch(() => {});
+
+        await this.postPaymentQueueService.addInvoicePipelineJob({
+          paymentId,
+          clientId,
+          subscriptionId,
+          amount,
+          planName,
+          sessionId,
+          customer
+        }).catch(() => {});
+      }
     } catch {
       // Non-blocking background job enqueuing
     }
@@ -606,6 +839,9 @@ export class CheckoutService extends BaseService {
       clientId: checkoutDoc.clientId?.toString?.(),
       receiptNo: paymentObj?.receiptNo,
       amount: checkoutDoc.amount,
+      planTotalPrice: checkoutDoc.planTotalPrice,
+      remainingAmount: checkoutDoc.remainingAmount,
+      durationInMonths: checkoutDoc.durationInMonths,
     };
   }
 }

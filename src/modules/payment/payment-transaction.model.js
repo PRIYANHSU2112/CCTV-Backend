@@ -31,6 +31,14 @@ const paymentTransactionSchema = new mongoose.Schema(
       required: [true, 'Payment amount is required'],
       min: [0.01, 'Payment amount must be greater than zero'],
     },
+    planTotalPrice: {
+      type: Number,
+      default: null,
+    },
+    remainingAmount: {
+      type: Number,
+      default: 0,
+    },
     amountPaise: {
       type: Number,
       min: 1,
@@ -71,6 +79,12 @@ const paymentTransactionSchema = new mongoose.Schema(
       unique: true,
       uppercase: true,
       trim: true,
+    },
+    transactionId: {
+      type: String,
+      trim: true,
+      default: null,
+      index: true,
     },
     note: {
       type: String,

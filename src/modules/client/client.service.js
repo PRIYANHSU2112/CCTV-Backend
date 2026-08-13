@@ -302,125 +302,7 @@ export class ClientService extends BaseService {
     return clientObj;
   }
 
-  /**
-   * Client detail dashboard for Admin ClientDetailPage
-   */
-  async getClientDashboard(id) {
-    const client = await this.clientRepository.findById(id);
-    if (!client) {
-      this.throwNotFound('Client');
-    }
 
-    const clientObj = this.#mapClientDetail(client);
-    const userId = client.userId?._id || client.userId;
-
-    let subscriptions = [];
-    if (this.subscriptionRepository?.findSubscriptionsByClientUserId && userId) {
-      const rows = await this.subscriptionRepository.findSubscriptionsByClientUserId(userId);
-      subscriptions = (rows || []).map((s) => {
-        const row = s.toJSON ? s.toJSON() : s;
-        return {
-          id: row.id || row._id?.toString(),
-          clientId: id,
-          clientName: clientObj.name,
-          plan: row.planId?.billingCycle || row.packageTier || clientObj.plan,
-          packageName: row.planId?.name || row.packageTier,
-          packageTier: row.packageTier,
-          status: row.status,
-          autoRenew: row.autoRenewal,
-          startDate: row.contractStartDate,
-          renewalDate: row.renewalDate,
-          amount: row.monthlyCharge,
-          cameras: row.cameraCount,
-          lastPaymentDate: row.lastPaymentDate,
-        };
-      });
-    } else if (client.currentSubscriptionId) {
-      const sub = client.currentSubscriptionId;
-      const row = sub.toJSON ? sub.toJSON() : sub;
-      subscriptions = [
-        {
-          id: row.id || row._id?.toString(),
-          clientId: id,
-          clientName: clientObj.name,
-          plan: row.packageTier,
-          packageName: row.packageTier,
-          status: row.status,
-          autoRenew: row.autoRenewal,
-          startDate: row.contractStartDate,
-          renewalDate: row.renewalDate,
-          amount: row.monthlyCharge,
-          cameras: row.cameraCount,
-        },
-      ];
-    }
-
-    const activeSub = subscriptions[0];
-    const renewal = activeSub?.renewalDate
-      ? new Date(activeSub.renewalDate)
-      : clientObj.renewalDate
-        ? new Date(clientObj.renewalDate)
-        : null;
-    const today = new Date();
-    const daysOverdue =
-      clientObj.status === 'Overdue' || clientObj.status === 'Suspended'
-        ? Math.max(0, renewal ? Math.floor((today - renewal) / 86400000) : 0)
-        : 0;
-
-    const totalPaid = subscriptions.reduce((sum, s) => {
-      return s.lastPaymentDate ? sum + Number(s.amount || 0) : sum;
-    }, 0);
-
-    const outstanding =
-      clientObj.status === 'Overdue' || clientObj.status === 'Due'
-        ? Number(clientObj.monthlyCharge || 0)
-        : 0;
-
-    return {
-      client: {
-        ...clientObj,
-        outstanding,
-      },
-      kpis: {
-        totalPaid,
-        outstanding,
-        invoicesCount: 0,
-        paymentSuccessRate: 100,
-        daysOverdue,
-        cameras: clientObj.cameras,
-      },
-      paymentTimeline: activeSub?.lastPaymentDate
-        ? [
-          {
-            date: activeSub.lastPaymentDate,
-            amount: activeSub.amount,
-            status: 'Paid',
-            method: 'Gateway',
-          },
-        ]
-        : [],
-      invoiceBreakdown: [
-        { status: 'Paid', count: totalPaid > 0 ? 1 : 0 },
-        { status: 'Partial', count: 0 },
-        { status: 'Unpaid', count: 0 },
-        { status: 'Overdue', count: clientObj.status === 'Overdue' ? 1 : 0 },
-        { status: 'Cancelled', count: 0 },
-      ],
-      reminderStats: { sent: 0, queued: 0, failed: 0 },
-      payments: [],
-      invoices: [],
-      reminders: [],
-      activity: [
-        {
-          id: `ACT-${id}`,
-          type: 'client',
-          message: `Client profile loaded for ${clientObj.businessName}`,
-          at: clientObj.updatedAt || clientObj.createdAt || new Date().toISOString(),
-        },
-      ],
-      subscriptions,
-    };
-  }
 
   #mapClientDetail(client) {
     const raw = client.toJSON ? client.toJSON() : client;
@@ -429,6 +311,22 @@ export class ClientService extends BaseService {
       raw.currentSubscriptionId && typeof raw.currentSubscriptionId === 'object'
         ? raw.currentSubscriptionId
         : null;
+
+    const totalPlanPrice =
+      sub?.totalPlanPrice ||
+      sub?.planId?.totalPrice ||
+      (sub?.monthlyCharge ? Math.round(sub.monthlyCharge * 1.18 * 100) / 100 : 0);
+    const paidAmount = sub?.paidAmount !== undefined && sub?.paidAmount !== null
+      ? Number(sub.paidAmount)
+      : (sub?.monthlyCharge || 0);
+    const calculatedRemaining = totalPlanPrice > 0
+      ? Math.max(0, Math.round((totalPlanPrice - paidAmount) * 100) / 100)
+      : 0;
+    const remainingAmount =
+      sub?.remainingAmount !== undefined && sub?.remainingAmount !== null && sub?.remainingAmount > 0
+        ? Number(sub.remainingAmount)
+        : calculatedRemaining;
+    const isSubActivePaid = sub?.status === 'ACTIVE' && remainingAmount <= 0 && paidAmount >= totalPlanPrice;
 
     return {
       id: raw.id || raw._id?.toString(),
@@ -442,15 +340,22 @@ export class ClientService extends BaseService {
       state: raw.installationAddress?.state || 'Madhya Pradesh',
       gstin: raw.gstin || '',
       cameras: raw.totalCamerasInstalled || raw.cameras?.length || sub?.cameraCount || 0,
-      status: raw.status || ClientStatus.ACTIVE,
-      plan: sub?.packageTier || 'BASIC',
+      status: isSubActivePaid ? ClientStatus.ACTIVE : (raw.status || ClientStatus.ACTIVE),
+      plan: sub?.billingCycle || 'MONTHLY',
       packageTier: sub?.packageTier || 'BASIC',
+      packageName: sub?.planId?.name || sub?.packageTier || 'BASIC',
+      planName: sub?.planId?.name || sub?.packageTier || 'BASIC',
+      durationInMonths: sub?.durationInMonths || sub?.planId?.durationInMonths || 1,
+      totalPlanPrice,
+      paidAmount,
+      remainingAmount,
       monthlyCharge: sub?.monthlyCharge || 0,
+      planCharge: totalPlanPrice,
       renewalDate: sub?.renewalDate || null,
       nextDueDate: sub?.renewalDate || null,
       contractStart: sub?.contractStartDate || raw.createdAt || null,
       autoRenew: sub?.autoRenewal !== undefined ? sub.autoRenewal : true,
-      outstanding: 0,
+      outstanding: isSubActivePaid ? 0 : remainingAmount,
       createdAt: raw.createdAt,
       updatedAt: raw.updatedAt,
       userId: user?.id || user?._id || raw.userId,
@@ -580,7 +485,7 @@ export class ClientService extends BaseService {
       this.throwNotFound('Client');
     }
 
-    const clientObj = this.#mapClientDetail(client);
+    let clientObj = this.#mapClientDetail(client);
     const clientMongoId = client._id || client.id;
     const userMongoId = client.userId?._id || client.userId;
 
@@ -596,11 +501,60 @@ export class ClientService extends BaseService {
       ClientSubscriptionModel.find({ $or: idFilter }).populate('planId').sort({ createdAt: -1 }).lean().exec(),
     ]);
 
+    // Map Subscriptions
+    const subscriptions = rawSubscriptions.map((sub) => {
+      const planDoc = sub.planId || {};
+      const durationInMonths = sub.durationInMonths || planDoc.durationInMonths || 1;
+      const totalPlanPrice = sub.totalPlanPrice || planDoc.totalPrice || (sub.monthlyCharge ? Math.round(sub.monthlyCharge * 1.18 * 100) / 100 : 0);
+      const paidAmount = sub.paidAmount !== undefined && sub.paidAmount !== null
+        ? Number(sub.paidAmount)
+        : (sub.monthlyCharge || totalPlanPrice);
+      const calculatedRemaining = totalPlanPrice > 0
+        ? Math.max(0, Math.round((totalPlanPrice - paidAmount) * 100) / 100)
+        : 0;
+      const remainingAmount = sub.remainingAmount !== undefined && sub.remainingAmount !== null && sub.remainingAmount > 0
+        ? Number(sub.remainingAmount)
+        : calculatedRemaining;
+
+      return {
+        id: String(sub._id),
+        plan: sub.billingCycle || planDoc.billingCycle || clientObj.plan || 'MONTHLY',
+        planName: planDoc.name || sub.packageTier || clientObj.packageName || 'CCTV Plan',
+        packageName: planDoc.name || sub.packageTier || clientObj.packageName || 'CCTV Plan',
+        packageTier: sub.packageTier,
+        durationInMonths,
+        totalPlanPrice,
+        paidAmount,
+        remainingAmount,
+        status: sub.status || 'ACTIVE',
+        startDate: sub.contractStartDate || sub.createdAt,
+        renewalDate: sub.renewalDate,
+        amount: Number(paidAmount),
+        monthlyCharge: Number(sub.monthlyCharge || 0),
+        createdAt: sub.createdAt,
+      };
+    });
+
+    const activeSub = subscriptions.find((s) => s.status === 'ACTIVE' || s.status === 'Active') || subscriptions[0];
+    const isFullyPaidActive = activeSub && (activeSub.status === 'ACTIVE' || activeSub.status === 'Active') && activeSub.remainingAmount <= 0 && activeSub.paidAmount >= activeSub.totalPlanPrice;
+
+    // Auto-sync client status in DB to 'Active' if subscription is active & fully paid
+    if (isFullyPaidActive && (client.status === 'Due' || client.status === 'DUE' || client.status !== ClientStatus.ACTIVE)) {
+      clientObj.status = ClientStatus.ACTIVE;
+      this.clientRepository.updateStatus(client._id || client.id, ClientStatus.ACTIVE).catch(() => {});
+      try {
+        this.redisService.del(`client:${client._id || client.id}`);
+        this.redisService.del('client:stats');
+      } catch {
+        // Safe redis
+      }
+    }
+
     // Map Invoices
     const invoices = rawInvoices.map((inv) => {
       const total = Number(inv.totalAmount || inv.total || 0);
-      const paid = Number(inv.amountPaid || 0);
-      const balance = inv.amountDue !== undefined ? Number(inv.amountDue) : Math.max(0, total - paid);
+      const paid = Number(inv.amountPaid || (isFullyPaidActive ? total : 0));
+      const balance = isFullyPaidActive ? 0 : (inv.amountDue !== undefined ? Number(inv.amountDue) : Math.max(0, total - paid));
       return {
         id: inv.invoiceNumber || String(inv._id),
         _id: String(inv._id),
@@ -608,7 +562,7 @@ export class ClientService extends BaseService {
         invoiceType: inv.invoiceType || 'NEW_PLAN',
         issueDate: inv.issueDate || inv.createdAt,
         dueDate: inv.dueDate || inv.createdAt,
-        status: inv.status || 'UNPAID',
+        status: isFullyPaidActive ? 'PAID' : (inv.status || 'UNPAID'),
         total,
         amountPaid: paid,
         balance,
@@ -645,28 +599,15 @@ export class ClientService extends BaseService {
       createdAt: r.createdAt,
     }));
 
-    // Map Subscriptions
-    const subscriptions = rawSubscriptions.map((sub) => ({
-      id: String(sub._id),
-      plan: sub.billingCycle || sub.planId?.billingCycle || clientObj.plan || 'MONTHLY',
-      packageName: sub.packageTier || sub.planId?.packageTier || clientObj.packageTier || 'BASIC',
-      status: sub.status || 'ACTIVE',
-      startDate: sub.contractStartDate || sub.createdAt,
-      renewalDate: sub.renewalDate,
-      amount: Number(sub.monthlyCharge || 0),
-      createdAt: sub.createdAt,
-    }));
-
     // Build Activity Timeline
     const activity = [];
-
     if (client.createdAt) {
       activity.push({
         id: `act-onboarded-${client._id}`,
         type: 'Client',
         title: `Client account "${client.businessName}" created`,
         at: client.createdAt,
-        meta: `Status: ${client.status || 'Active'}`,
+        meta: `Status: ${clientObj.status}`,
       });
     }
 
@@ -702,22 +643,31 @@ export class ClientService extends BaseService {
 
     activity.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
 
-    const totalPaid = payments
+    const totalPaidFromPayments = payments
       .filter((p) => p.status === 'PAID')
       .reduce((sum, p) => sum + p.amount, 0);
 
-    const outstanding = invoices
+    const totalPaidFromSubscriptions = subscriptions
+      .reduce((sum, s) => sum + Number(s.paidAmount || 0), 0);
+
+    const totalPaid = Math.max(totalPaidFromPayments, totalPaidFromSubscriptions);
+
+    const subRemainingTotal = subscriptions.reduce((sum, s) => sum + Number(s.remainingAmount || 0), 0);
+    const invoiceOutstandingTotal = invoices
       .filter((inv) => ['UNPAID', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status))
       .reduce((sum, inv) => sum + inv.balance, 0);
+
+    const outstanding = isFullyPaidActive
+      ? 0
+      : Math.max(subRemainingTotal, invoiceOutstandingTotal);
 
     const paymentSuccessRate = payments.length
       ? Math.round((payments.filter((p) => p.status === 'PAID').length / payments.length) * 100)
       : 100;
 
-    const paymentTimeline = payments.map((p) => ({
-      date: p.paidAt,
-      amount: p.amount,
-    }));
+    const paymentTimeline = payments.length
+      ? payments.map((p) => ({ date: p.paidAt, amount: p.amount }))
+      : subscriptions.map((s) => ({ date: s.startDate, amount: s.paidAmount || s.totalPlanPrice }));
 
     const statusCounts = { Paid: 0, Partial: 0, Unpaid: 0, Overdue: 0, Cancelled: 0 };
     invoices.forEach((inv) => {

@@ -28,6 +28,22 @@ const clientSubscriptionSchema = new mongoose.Schema(
       type: Number,
       required: [true, 'Monthly charge is required']
     },
+    totalPlanPrice: {
+      type: Number,
+      default: null
+    },
+    paidAmount: {
+      type: Number,
+      default: null
+    },
+    remainingAmount: {
+      type: Number,
+      default: 0
+    },
+    durationInMonths: {
+      type: Number,
+      default: 1
+    },
     contractStartDate: {
       type: Date,
       required: [true, 'Contract start date is required']

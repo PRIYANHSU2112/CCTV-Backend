@@ -47,13 +47,6 @@ const subscriptionPlanSchema = new mongoose.Schema(
       max: 48,
       default: 1
     },
-    activationMonths: {
-      type: Number,
-      required: true,
-      min: 1,
-      max: 48,
-      default: 1
-    },
     basePrice: {
       type: Number,
       required: [true, 'Base price is required'],
@@ -124,11 +117,6 @@ subscriptionPlanSchema.pre('validate', function (next) {
       [BillingCycle.YEARLY]: 12
     };
     this.durationInMonths = cycleDurations[this.billingCycle] || 1;
-  }
-
-  // Auto set activationMonths to durationInMonths if not specified
-  if (!this.activationMonths) {
-    this.activationMonths = this.durationInMonths || 1;
   }
 
   next();

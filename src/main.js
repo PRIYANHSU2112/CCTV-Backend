@@ -11,6 +11,8 @@ const startServer = async () => {
   // Initialize cron jobs
   initScheduledTasks();
 
+
+
   const { app, redisClient } = await createApp();
 
   const server = app.listen(env.PORT, () => {

@@ -46,6 +46,11 @@ const checkoutSessionSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    existingSubscriptionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ClientSubscription',
+      default: null,
+    },
     paymentTransactionId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'PaymentTransaction',
@@ -59,6 +64,18 @@ const checkoutSessionSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0.01,
+    },
+    planTotalPrice: {
+      type: Number,
+      default: null,
+    },
+    remainingAmount: {
+      type: Number,
+      default: 0,
+    },
+    durationInMonths: {
+      type: Number,
+      default: 1,
     },
     amountPaise: {
       type: Number,

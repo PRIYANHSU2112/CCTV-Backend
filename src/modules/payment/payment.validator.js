@@ -13,17 +13,15 @@ export const createPaymentSchema = Joi.object({
     'number.positive': 'Amount must be greater than zero',
     'any.required': 'Amount is required',
   }),
-  method: Joi.string()
-    .valid(...Object.values(PaymentMethod))
-    .required()
-    .messages({
-      'any.only': 'Invalid payment method (Must be UPI, BANK_TRANSFER, CASH, or GATEWAY)',
-    }),
+  method: Joi.string().trim().required().messages({
+    'any.required': 'Payment method is required',
+  }),
   status: Joi.string()
     .valid(...Object.values(PaymentStatus))
     .default(PaymentStatus.PAID),
   paidAt: Joi.date().iso().optional().allow(null),
   invoiceId: Joi.string().trim().max(64).optional().allow('', null),
+  transactionId: Joi.string().trim().max(100).optional().allow('', null),
   note: Joi.string().trim().max(500).optional().allow('', null),
   subscriptionId: objectId.optional().allow(null),
 }).prefs({ convert: true });
@@ -59,6 +57,8 @@ export const createCheckoutSessionSchema = Joi.object({
   planId: objectId.required().messages({
     'any.required': 'Plan ID is required',
   }),
+  customAmount: Joi.number().positive().optional().allow(null, 0),
+  existingSubscriptionId: objectId.optional().allow(null, ''),
   name: Joi.string().trim().min(2).max(100).required(),
   phone: Joi.string()
     .pattern(/^[0-9+\s-]{8,15}$/)
@@ -71,6 +71,8 @@ export const createCheckoutSessionSchema = Joi.object({
   gstin: Joi.string().trim().allow('', null),
   state: Joi.string().trim().default('Madhya Pradesh'),
 }).prefs({ convert: true });
+
+
 
 export const verifyCheckoutSchema = Joi.object({
   sessionId: Joi.string().trim().min(16).max(64).required(),

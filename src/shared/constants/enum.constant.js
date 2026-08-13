@@ -80,7 +80,10 @@ export const PaymentMethod = Object.freeze({
   UPI: 'UPI',
   BANK_TRANSFER: 'BANK_TRANSFER',
   CASH: 'CASH',
-  GATEWAY: 'GATEWAY'
+  GATEWAY: 'GATEWAY',
+  CARD: 'CARD',
+  CHEQUE: 'CHEQUE',
+  ONLINE: 'ONLINE',
 });
 
 export const PaymentStatus = Object.freeze({

@@ -24,7 +24,6 @@ export const createPlanSchema = Joi.object({
     'any.only': 'Invalid billing cycle (Must be MONTHLY, QUARTERLY, HALF_YEARLY, or YEARLY)'
   }),
   durationInMonths: Joi.number().integer().min(1).max(48).optional(),
-  activationMonths: Joi.number().integer().min(1).max(48).optional(),
   basePrice: Joi.number().positive().required().messages({
     'number.positive': 'Base price must be a positive number'
   }),
@@ -44,7 +43,6 @@ export const updatePlanSchema = Joi.object({
   packageTier: Joi.string().valid(...Object.values(PackageTier)).optional(),
   billingCycle: Joi.string().valid(...Object.values(BillingCycle)).optional(),
   durationInMonths: Joi.number().integer().min(1).max(48).optional(),
-  activationMonths: Joi.number().integer().min(1).max(48).optional(),
   basePrice: Joi.number().positive().optional(),
   gstPercentage: Joi.number().min(0).max(28).optional(),
   maxCameras: Joi.number().integer().min(1).optional(),
