@@ -8,9 +8,9 @@ export class S3Service {
       region: env.AWS_REGION || 'sgp1',
       credentials: env.AWS_ACCESS_KEY_ID
         ? {
-            accessKeyId: env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: env.AWS_SECRET_ACCESS_KEY
-          }
+          accessKeyId: env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: env.AWS_SECRET_ACCESS_KEY
+        }
         : undefined
     };
 
@@ -27,9 +27,13 @@ export class S3Service {
    */
   async uploadFile(fileBuffer, key, mimeType) {
     try {
+      const folderPrefix = (env.BUCKET_FOLDER_PATH || 'CCTV/').replace(/^\/+/, '');
+      const cleanKey = String(key).replace(/^\/+/, '');
+      const fullKey = cleanKey.startsWith(folderPrefix) ? cleanKey : `${folderPrefix}${cleanKey}`;
+
       const command = new PutObjectCommand({
         Bucket: this.bucket,
-        Key: key,
+        Key: fullKey,
         Body: fileBuffer,
         ContentType: mimeType,
         ACL: 'public-read' // Ensures object is publicly accessible via web URL
@@ -40,15 +44,17 @@ export class S3Service {
       let fileUrl;
       if (env.AWS_ENDPOINT) {
         // DigitalOcean Spaces or custom S3 endpoint
-        const cleanEndpoint = env.AWS_ENDPOINT.replace(/^https?:\/\//, '').replace(/\/$/, '');
-        if (cleanEndpoint.includes('digitaloceanspaces.com')) {
-          fileUrl = `https://${this.bucket}.${cleanEndpoint}/${key}`;
+        const cleanEndpoint = env.AWS_ENDPOINT.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+        if (cleanEndpoint.startsWith(`${this.bucket}.`)) {
+          fileUrl = `https://${cleanEndpoint}/${fullKey}`;
+        } else if (cleanEndpoint.includes('digitaloceanspaces.com')) {
+          fileUrl = `https://${this.bucket}.${cleanEndpoint}/${fullKey}`;
         } else {
-          fileUrl = `${env.AWS_ENDPOINT}/${this.bucket}/${key}`;
+          fileUrl = `https://${cleanEndpoint}/${this.bucket}/${fullKey}`;
         }
       } else {
         // Standard AWS S3 URL format
-        fileUrl = `https://${this.bucket}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+        fileUrl = `https://${this.bucket}.s3.${env.AWS_REGION}.amazonaws.com/${fullKey}`;
       }
 
       logger.info(`☁️ File successfully uploaded to S3/Spaces: [${fileUrl}]`);

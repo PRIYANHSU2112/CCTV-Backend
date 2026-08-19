@@ -15,8 +15,11 @@ export class PdfService {
   loadSaburiLogo() {
     try {
       const logoPaths = [
+        path.resolve('src/assets/brand/saburi-logo.png'),
+        path.resolve('public/brand/saburi-logo.png'),
         path.resolve('c:/Users/HP/Downloads/Cctv main/cctv-Admin/public/brand/saburi-logo.png'),
-        path.resolve('../cctv-Admin/public/brand/saburi-logo.png')
+        path.resolve('../cctv-Admin/public/brand/saburi-logo.png'),
+        path.resolve('../CC/public/brand/saburi-logo.png')
       ];
 
       for (const logoPath of logoPaths) {
@@ -28,20 +31,29 @@ export class PdfService {
     } catch (err) {
       logger.warn(`Could not load Saburi logo image file: ${err.message}`);
     }
-    return '';
+    return 'https://satyakabir-bucket.sgp1.digitaloceanspaces.com/CCTV/brand/saburi-logo.png';
   }
 
   /**
    * Lazily obtain or initialize singleton Puppeteer browser instance
    */
   async getBrowser() {
-    if (this.browser && this.browser.isConnected()) {
+    const isConnected = Boolean(this.browser && (typeof this.browser.isConnected === 'function' ? this.browser.isConnected() : this.browser.connected));
+    if (isConnected) {
       return this.browser;
     }
     logger.info('🚀 Launching Puppeteer Singleton Browser Instance for PDF Generation...');
     let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    if (executablePath && !fs.existsSync(executablePath)) {
-      const fallbacks = ['/usr/bin/chromium-browser', '/usr/bin/chromium'];
+    if (!executablePath || !fs.existsSync(executablePath)) {
+      const fallbacks = [
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/brave-browser',
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+      ];
       executablePath = fallbacks.find((p) => fs.existsSync(p)) || undefined;
     }
 
@@ -92,6 +104,7 @@ export class PdfService {
       <tr class="${index % 2 === 0 ? 'even-row' : ''}">
         <td style="text-align: center; font-weight: 600; color: #64748b;">${index + 1}</td>
         <td style="font-weight: 600; color: #1e293b;">${item.description}</td>
+        <td style="text-align: center; font-family: monospace; font-size: 11px; font-weight: 700; color: #475569; letter-spacing: 0.5px;">${item.hsnSac || '998529'}</td>
         <td style="text-align: center; color: #334155;">${item.quantity}</td>
         <td style="text-align: right; color: #334155;">₹${(item.unitPrice || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
         <td style="text-align: right; font-weight: 700; color: #0f172a;">₹${(item.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
@@ -105,22 +118,52 @@ export class PdfService {
       ? new Date(invoice.issueDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
       : 'N/A';
 
-    const isPaid = invoice.status === 'PAID';
-    const statusBg = isPaid ? '#dcfce7' : '#fee2e2';
-    const statusBorder = isPaid ? '#86efac' : '#fca5a5';
-    const statusColor = isPaid ? '#15803d' : '#b91c1c';
+    const status = String(invoice.status || 'UNPAID').toUpperCase();
+    const isPaid = status === 'PAID';
+    const isPartial = status === 'PARTIALLY_PAID' || status === 'PARTIAL';
+    
+    let statusBg = '#fee2e2';
+    let statusBorder = '#fca5a5';
+    let statusColor = '#b91c1c';
 
-    // Logo rendering (Image or fallback SVG shield emblem)
-    const logoHtml = this.logoBase64
-      ? `<img src="${this.logoBase64}" alt="Saburi Security Agency Logo" style="max-height: 65px; width: auto; object-fit: contain;" />`
-      : `
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <svg width="42" height="42" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 2L3 7V12C3 17.55 6.84 22.74 12 24C17.16 22.74 21 17.55 21 12V7L12 2Z" fill="#0f172a"/>
-            <path d="M12 6L17 9V12C17 15.3 14.87 18.3 12 19.3C9.13 18.3 7 15.3 7 12V9L12 6Z" fill="#d97706"/>
-          </svg>
-        </div>
-      `;
+    if (isPaid) {
+      statusBg = '#dcfce7';
+      statusBorder = '#86efac';
+      statusColor = '#15803d';
+    } else if (isPartial) {
+      statusBg = '#fef3c7';
+      statusBorder = '#fde68a';
+      statusColor = '#d97706';
+    }
+
+    // Determine Client Details
+    const clientUser = client?.userId && typeof client.userId === 'object' ? client.userId : (client?.user || {});
+    const clientName = client?.businessName || clientUser?.name || client?.name || 'Valued Client';
+    const contactPerson = clientUser?.name || client?.contactPerson || '';
+    const gstin = client?.gstin || invoice.gstin || '';
+    const address = client?.installationAddress?.address || client?.address || 'Installation Site Address';
+    const city = client?.installationAddress?.city || client?.city || '';
+    const state = client?.installationAddress?.state || client?.state || 'Madhya Pradesh';
+    const pincode = client?.installationAddress?.pincode || client?.pincode || '';
+    const fullAddress = [address, city, state, pincode].filter(Boolean).join(', ');
+    const phone = client?.phone || clientUser?.phone || 'N/A';
+    const email = client?.email || clientUser?.email || 'N/A';
+
+    // Tax amounts resolution
+    const taxRate = invoice.taxPercentage ?? 18;
+    const cgstRate = (taxRate / 2).toFixed(1);
+    const sgstRate = (taxRate / 2).toFixed(1);
+
+    const totalTax = invoice.taxAmount || 0;
+    const isInterState = Boolean(invoice.igstAmount && invoice.igstAmount > 0);
+    const cgstAmount = isInterState ? 0 : (invoice.cgstAmount ?? Math.round((totalTax / 2) * 100) / 100);
+    const sgstAmount = isInterState ? 0 : (invoice.sgstAmount ?? Math.round((totalTax - cgstAmount) * 100) / 100);
+    const igstAmount = isInterState ? (invoice.igstAmount ?? totalTax) : 0;
+
+    // Logo rendering
+    const logoSrc = this.logoBase64 || 'https://satyakabir-bucket.sgp1.digitaloceanspaces.com/CCTV/brand/saburi-logo.png';
+    const logoHtml = `<img src="${logoSrc}" alt="Saburi Security Agency Logo" style="max-height: 68px; max-width: 220px; object-fit: contain;" />`;
+
 
     return `
       <!DOCTYPE html>
@@ -139,31 +182,33 @@ export class PdfService {
             line-height: 1.5;
           }
           .invoice-container {
-            max-width: 800px;
+            max-width: 850px;
             margin: 0 auto;
-            padding: 32px;
+            background: #ffffff;
+            padding: 24px;
           }
-          /* Top Header Banner */
+          
+          /* Header Banner */
           .header-banner {
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            padding-bottom: 24px;
-            border-bottom: 3px solid #0f172a;
+            border-bottom: 2px solid #0f172a;
+            padding-bottom: 20px;
+            margin-bottom: 24px;
           }
           .agency-name {
-            font-size: 24px;
+            font-size: 22px;
             font-weight: 800;
             color: #0f172a;
             letter-spacing: -0.5px;
-            text-transform: uppercase;
           }
           .agency-tagline {
             font-size: 11px;
             font-weight: 600;
             color: #d97706;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 1px;
             margin-top: 2px;
           }
           .agency-meta {
@@ -176,52 +221,52 @@ export class PdfService {
             text-align: right;
           }
           .invoice-title {
-            font-size: 30px;
+            font-size: 28px;
             font-weight: 800;
             color: #0f172a;
-            letter-spacing: 1px;
+            letter-spacing: -1px;
           }
           .invoice-num {
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 700;
-            color: #475569;
+            color: #64748b;
             margin-top: 2px;
           }
           .badge {
             display: inline-block;
             margin-top: 8px;
-            padding: 5px 14px;
+            padding: 4px 12px;
             font-size: 11px;
-            font-weight: 800;
-            border-radius: 6px;
-            background-color: ${statusBg};
-            border: 1px solid ${statusBorder};
-            color: ${statusColor};
+            font-weight: 700;
             letter-spacing: 0.5px;
-            text-transform: uppercase;
+            border-radius: 9999px;
+            background-color: ${statusBg};
+            color: ${statusColor};
+            border: 1px solid ${statusBorder};
           }
-          
+
           /* Details Grid */
           .details-grid {
-            display: flex;
-            justify-content: space-between;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
             gap: 24px;
-            margin: 28px 0;
+            margin-bottom: 24px;
           }
           .info-card {
-            flex: 1;
             background-color: #f8fafc;
             border: 1px solid #e2e8f0;
             border-radius: 8px;
             padding: 16px;
           }
           .card-title {
-            font-size: 10px;
-            font-weight: 800;
+            font-size: 11px;
+            font-weight: 700;
             color: #64748b;
             text-transform: uppercase;
-            letter-spacing: 0.8px;
+            letter-spacing: 0.5px;
             margin-bottom: 8px;
+            border-bottom: 1px solid #e2e8f0;
+            padding-bottom: 4px;
           }
           .client-name {
             font-size: 15px;
@@ -229,11 +274,11 @@ export class PdfService {
             color: #0f172a;
           }
 
-          /* Table Styling */
+          /* Items Table */
           .items-table {
             width: 100%;
             border-collapse: collapse;
-            margin: 24px 0 20px 0;
+            margin-bottom: 24px;
           }
           .items-table th {
             background-color: #0f172a;
@@ -242,34 +287,33 @@ export class PdfService {
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            padding: 12px;
+            padding: 10px 12px;
           }
           .items-table td {
             padding: 12px;
             border-bottom: 1px solid #e2e8f0;
+            font-size: 12px;
           }
-          .items-table tr.even-row {
+          .even-row {
             background-color: #f8fafc;
           }
 
-          /* Summary Box */
+          /* Summary Layout */
           .summary-wrapper {
             display: flex;
             justify-content: space-between;
-            align-items: flex-start;
-            margin-top: 10px;
+            gap: 32px;
+            margin-bottom: 30px;
           }
           .payment-terms {
-            width: 55%;
+            flex: 1;
             font-size: 11px;
             color: #64748b;
-            background-color: #f1f5f9;
-            border-radius: 8px;
-            padding: 14px;
+            line-height: 1.6;
           }
           .summary-card {
-            width: 40%;
-            background-color: #ffffff;
+            width: 320px;
+            background-color: #f8fafc;
             border: 1px solid #e2e8f0;
             border-radius: 8px;
             padding: 16px;
@@ -277,15 +321,15 @@ export class PdfService {
           .summary-line {
             display: flex;
             justify-content: space-between;
-            padding: 6px 0;
+            margin-bottom: 8px;
             font-size: 12px;
             color: #475569;
           }
           .summary-line.total {
             border-top: 2px solid #0f172a;
-            margin-top: 8px;
             padding-top: 10px;
-            font-size: 16px;
+            margin-top: 10px;
+            font-size: 15px;
             font-weight: 800;
             color: #0f172a;
           }
@@ -331,7 +375,7 @@ export class PdfService {
             <div class="invoice-heading">
               <div class="invoice-title">TAX INVOICE</div>
               <div class="invoice-num"># ${invoice.invoiceNumber || ''}</div>
-              <div><span class="badge">${invoice.status || 'UNPAID'}</span></div>
+              <div><span class="badge">${status}</span></div>
             </div>
           </div>
 
@@ -339,14 +383,15 @@ export class PdfService {
           <div class="details-grid">
             <div class="info-card">
               <div class="card-title">Billed To (Client Details)</div>
-              <div class="client-name">${client?.name || client?.user?.name || 'Valued Client'}</div>
+              <div class="client-name">${clientName}</div>
+              ${contactPerson && contactPerson !== clientName ? `<div style="font-weight: 600; color: #334155; margin-top: 2px;">Attn: ${contactPerson}</div>` : ''}
+              ${gstin ? `<div style="font-weight: 700; color: #0f172a; margin-top: 4px; font-size: 11px;">GSTIN: ${gstin}</div>` : ''}
               <div style="color: #475569; margin-top: 4px;">
-                ${client?.installationAddress?.address || client?.address || 'Installation Site Address'}<br>
-                ${client?.installationAddress?.city || client?.city || ''}
+                ${fullAddress}
               </div>
               <div style="color: #475569; margin-top: 6px; font-weight: 600;">
-                Phone: ${client?.user?.phone || client?.phone || 'N/A'}<br>
-                Email: ${client?.user?.email || client?.email || 'N/A'}
+                Phone: ${phone}<br>
+                Email: ${email}
               </div>
             </div>
             
@@ -364,6 +409,10 @@ export class PdfService {
                 <span style="color: #64748b;">Currency:</span>
                 <span style="font-weight: 700;">${invoice.currency || 'INR'}</span>
               </div>
+              <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                <span style="color: #64748b;">Payment Status:</span>
+                <span style="font-weight: 700; color: ${statusColor};">${status}</span>
+              </div>
             </div>
           </div>
 
@@ -371,11 +420,12 @@ export class PdfService {
           <table class="items-table">
             <thead>
               <tr>
-                <th style="width: 6%; text-align: center;">#</th>
-                <th style="width: 50%; text-align: left;">Item & Description</th>
-                <th style="width: 10%; text-align: center;">Qty</th>
-                <th style="width: 17%; text-align: right;">Unit Rate</th>
-                <th style="width: 17%; text-align: right;">Amount</th>
+                <th style="width: 5%; text-align: center;">#</th>
+                <th style="width: 45%; text-align: left;">Item & Description</th>
+                <th style="width: 14%; text-align: center;">HSN / SAC</th>
+                <th style="width: 8%; text-align: center;">Qty</th>
+                <th style="width: 14%; text-align: right;">Unit Rate</th>
+                <th style="width: 14%; text-align: right;">Amount</th>
               </tr>
             </thead>
             <tbody>
@@ -389,28 +439,48 @@ export class PdfService {
               <div style="font-weight: 700; color: #0f172a; margin-bottom: 4px;">Terms & Payment Instructions:</div>
               <p>• Bank: State Bank of India | A/C: 39482019283 | IFSC: SBIN0001234</p>
               <p>• UPI ID: saburi.security@sbi</p>
+              <p>• GST Classification: Services SAC 998529 (CCTV Monitoring) / Goods HSN 8525 (Surveillance Hardware)</p>
               <p>• Please pay by the due date to avoid service interruption.</p>
               ${invoice.notes ? `<p style="margin-top: 6px; font-style: italic;">Note: ${invoice.notes}</p>` : ''}
             </div>
 
             <div class="summary-card">
               <div class="summary-line">
-                <span>Subtotal:</span>
+                <span>Taxable Amount (Subtotal):</span>
                 <span>₹${(invoice.subtotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>
+              ${isInterState ? `
               <div class="summary-line">
-                <span>GST (${invoice.taxPercentage || 18}%):</span>
-                <span>₹${(invoice.taxAmount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                <span>IGST (${taxRate}%):</span>
+                <span>₹${(igstAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+              </div>` : `
+              <div class="summary-line">
+                <span>CGST (${cgstRate}%):</span>
+                <span>₹${(cgstAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>
+              <div class="summary-line">
+                <span>SGST (${sgstRate}%):</span>
+                <span>₹${(sgstAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+              </div>`}
               ${(invoice.discountAmount || 0) > 0 ? `
               <div class="summary-line" style="color: #16a34a; font-weight: 600;">
                 <span>Discount:</span>
                 <span>-₹${(invoice.discountAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>` : ''}
               <div class="summary-line total">
-                <span>Total Amount:</span>
+                <span>Total Amount (INR):</span>
                 <span>₹${(invoice.totalAmount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>
+              ${(invoice.amountPaid || 0) > 0 ? `
+              <div class="summary-line" style="color: #16a34a; font-weight: 600; margin-top: 4px;">
+                <span>Amount Paid:</span>
+                <span>₹${(invoice.amountPaid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+              </div>` : ''}
+              ${(invoice.amountDue !== undefined && invoice.amountDue !== null && invoice.amountDue > 0) ? `
+              <div class="summary-line" style="color: #dc2626; font-weight: 700;">
+                <span>Balance Due:</span>
+                <span>₹${(invoice.amountDue).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+              </div>` : ''}
             </div>
           </div>
 

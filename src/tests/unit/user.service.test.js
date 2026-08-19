@@ -82,54 +82,58 @@ describe('UserService (Unit Tests)', () => {
   });
 
   describe('sendOtp', () => {
-    it('should return static OTP 1234 and store in Redis', async () => {
+    it('should generate secure OTP and store in Redis', async () => {
       mockRedisService.set.mockResolvedValue(true);
 
       const result = await userService.sendOtp({ phone: '+919876543210' });
 
-      expect(result.otp).toBe('1234');
-      expect(result.phone).toBe('+919876543210');
-      expect(mockRedisService.set).toHaveBeenCalledWith('otp:+919876543210', '1234', 300);
+      expect(result.success).toBe(true);
+      expect(result.phone).toBe('9876543210');
+      expect(mockRedisService.set).toHaveBeenCalled();
     });
   });
 
   describe('loginByOtp', () => {
-    it('should successfully log in existing user with static OTP 1234', async () => {
+    it('should successfully log in existing user when valid OTP is verified against Redis', async () => {
       const mockUser = {
         _id: 'usr_1',
         id: 'usr_1',
-        phone: '+919876543210',
+        phone: '9876543210',
         status: 'ACTIVE',
-        toJSON: () => ({ id: 'usr_1', phone: '+919876543210', status: 'ACTIVE' })
+        toJSON: () => ({ id: 'usr_1', phone: '9876543210', status: 'ACTIVE' })
       };
+      mockRedisService.get.mockResolvedValue('543210');
+      mockRedisService.del.mockResolvedValue(1);
       mockUserRepository.findByPhone.mockResolvedValue(mockUser);
       mockUserRepository.updateLastLogin.mockResolvedValue(true);
 
-      const result = await userService.loginByOtp({ phone: '+919876543210', otp: '1234' });
+      const result = await userService.loginByOtp({ phone: '+919876543210', otp: '543210' });
 
       expect(result.user.id).toBe('usr_1');
       expect(result.tokens).toHaveProperty('accessToken');
       expect(mockUserRepository.updateLastLogin).toHaveBeenCalledWith('usr_1');
     });
 
-    it('should auto-create user if user does not exist with static OTP 1234', async () => {
+    it('should auto-create user if user does not exist with valid OTP', async () => {
+      mockRedisService.get.mockResolvedValue('543210');
+      mockRedisService.del.mockResolvedValue(1);
       mockUserRepository.findByPhone.mockResolvedValue(null);
       const createdUser = {
         _id: 'usr_new',
         id: 'usr_new',
-        phone: '+919876543210',
+        phone: '9876543210',
         name: 'User 3210',
         status: 'ACTIVE',
-        toJSON: () => ({ id: 'usr_new', phone: '+919876543210', name: 'User 3210', status: 'ACTIVE' })
+        toJSON: () => ({ id: 'usr_new', phone: '9876543210', name: 'User 3210', status: 'ACTIVE' })
       };
       mockUserRepository.create.mockResolvedValue(createdUser);
       mockUserRepository.updateLastLogin.mockResolvedValue(true);
 
-      const result = await userService.loginByOtp({ phone: '+919876543210', otp: '1234' });
+      const result = await userService.loginByOtp({ phone: '+919876543210', otp: '543210' });
 
       expect(mockUserRepository.create).toHaveBeenCalledWith({
         name: 'User 3210',
-        phone: '+919876543210',
+        phone: '9876543210',
         role: 'CLIENT',
         status: 'ACTIVE'
       });
@@ -142,7 +146,7 @@ describe('UserService (Unit Tests)', () => {
 
       await expect(
         userService.loginByOtp({ phone: '+919876543210', otp: '9999' })
-      ).rejects.toThrow('Invalid or expired OTP. Please use OTP 1234');
+      ).rejects.toThrow('Invalid or expired OTP');
     });
   });
 

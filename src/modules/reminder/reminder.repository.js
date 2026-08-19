@@ -56,7 +56,6 @@ export class ReminderRepository extends BaseRepository {
       { id: 'rem-3-before', label: '3 Days Before Due Date', days: -3, enabled: true, channels: ['WhatsApp', 'SMS'] },
       { id: 'rem-due-day', label: 'On Due Date', days: 0, enabled: true, channels: ['WhatsApp', 'SMS', 'Email'] },
       { id: 'rem-3-after', label: '3 Days After Due Date (Overdue)', days: 3, enabled: true, channels: ['WhatsApp', 'SMS'] },
-      { id: 'rem-7-after', label: '7 Days After Due Date (Final Notice)', days: 7, enabled: true, channels: ['WhatsApp', 'SMS', 'Email'] },
     ];
   }
 

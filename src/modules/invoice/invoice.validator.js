@@ -11,7 +11,8 @@ export const createInvoiceSchema = Joi.object({
       Joi.object({
         description: Joi.string().trim().max(300).required(),
         quantity: Joi.number().integer().min(1).default(1),
-        unitPrice: Joi.number().min(0).required()
+        unitPrice: Joi.number().min(0).required(),
+        hsnSac: Joi.string().trim().max(10).default('998529').optional().allow('', null)
       })
     )
     .optional()
@@ -22,10 +23,10 @@ export const createInvoiceSchema = Joi.object({
 export const queryInvoicesSchema = Joi.object({
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(100).default(10),
-  clientId: Joi.string().hex().length(24).optional(),
-  status: Joi.string().trim().optional(),
-  search: Joi.string().trim().optional().allow('')
-});
+  clientId: Joi.string().trim().allow('', 'all', null).optional(),
+  status: Joi.string().trim().allow('', 'all', null).optional(),
+  search: Joi.string().trim().allow('', null).optional()
+}).prefs({ convert: true, stripUnknown: true });
 
 export const getInvoiceByIdSchema = Joi.object({
   id: Joi.string().trim().required()

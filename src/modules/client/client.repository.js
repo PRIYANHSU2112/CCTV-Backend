@@ -138,6 +138,7 @@ export class ClientRepository extends BaseRepository {
         $match: {
           $or: [
             { businessName: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
             { 'user.name': { $regex: search, $options: 'i' } },
             { 'user.phone': { $regex: search, $options: 'i' } },
             { 'user.email': { $regex: search, $options: 'i' } },
@@ -160,7 +161,7 @@ export class ClientRepository extends BaseRepository {
               userId: '$user._id',
               name: '$user.name',
               phone: '$user.phone',
-              email: '$user.email',
+              email: { $ifNull: ['$email', '$user.email'] },
               businessName: 1,
               gstin: 1,
               address: '$installationAddress.address',

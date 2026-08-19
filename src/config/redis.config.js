@@ -7,23 +7,30 @@ let redisClient = null;
 export const createRedisClient = () => {
   if (redisClient) return redisClient;
 
-  redisClient = new Redis({
+  const config = {
     host: env.REDIS_HOST,
     port: env.REDIS_PORT,
-    password: env.REDIS_PASSWORD || undefined,
     db: env.REDIS_DB,
     lazyConnect: true,
-    commandTimeout: 100,
-    connectTimeout: 2000,
-    enableOfflineQueue: false,
+    connectTimeout: 10000,
+    commandTimeout: 10000,
+    enableOfflineQueue: true,
     keepAlive: 10000,
-    maxRetriesPerRequest: 3,
+    maxRetriesPerRequest: null,
     retryStrategy(times) {
       const delay = Math.min(times * 100, 3000);
       logger.warn(`Redis connection retry attempt #${times} in ${delay}ms`);
       return delay;
     }
-  });
+  };
+
+  // Only send password if it is explicitly set and non-empty
+  const password = env.REDIS_PASSWORD;
+  if (password && password.trim() && password.trim() !== 'undefined') {
+    config.password = password.trim();
+  }
+
+  redisClient = new Redis(config);
 
   redisClient.on('connect', () => {
     logger.info('Connected to Redis server successfully');

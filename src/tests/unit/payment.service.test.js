@@ -1,6 +1,10 @@
 import { jest } from '@jest/globals';
 import { PaymentService } from '../../modules/payment/payment.service.js';
 import { NotFoundError } from '../../shared/errors/not-found.error.js';
+import { CounterModel, InvoiceModel } from '../../modules/invoice/invoice.model.js';
+import { UserModel } from '../../modules/user/user.model.js';
+import { NotificationModel } from '../../modules/notification/notification.model.js';
+import { ClientSubscriptionModel } from '../../modules/subscription/client-subscription.model.js';
 
 describe('PaymentService (Unit Tests)', () => {
   let paymentService;
@@ -10,6 +14,30 @@ describe('PaymentService (Unit Tests)', () => {
   let mockRedisService;
 
   beforeEach(() => {
+    jest.spyOn(CounterModel, 'findByIdAndUpdate').mockReturnValue({
+      exec: jest.fn().mockResolvedValue({ seq: 1 })
+    });
+    jest.spyOn(ClientSubscriptionModel, 'findById').mockResolvedValue({
+      paidAmount: 0,
+      totalPlanPrice: 2000,
+      save: jest.fn().mockResolvedValue(true)
+    });
+    jest.spyOn(InvoiceModel, 'create').mockResolvedValue({
+      invoiceNumber: 'INV-2026-00001'
+    });
+    jest.spyOn(InvoiceModel, 'findOne').mockReturnValue({
+      sort: jest.fn().mockResolvedValue(null)
+    });
+    jest.spyOn(InvoiceModel, 'findById').mockResolvedValue(null);
+    jest.spyOn(UserModel, 'find').mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockReturnValue({
+          exec: jest.fn().mockResolvedValue([])
+        })
+      })
+    });
+    jest.spyOn(NotificationModel, 'insertMany').mockResolvedValue([]);
+
     mockPaymentRepository = {
       create: jest.fn(),
       findById: jest.fn(),

@@ -8,21 +8,35 @@ import { ClientSubscriptionModel } from '../subscription/client-subscription.mod
 import { InvoiceModel, getNextSequenceValue, InvoiceStatus, InvoiceType } from '../invoice/invoice.model.js';
 import { NotificationModel } from '../notification/notification.model.js';
 import { UserModel } from '../user/user.model.js';
+import { getFullPdfUrl } from '../../config/env.config.js';
+import { PdfService } from '../invoice/pdf.service.js';
+import { S3Service } from '../../shared/storage/s3.service.js';
+import { extractGstFromInclusive, roundMoney, toPaise } from '../../shared/utils/money.util.js';
+import { sendPaymentReceiptEmail } from '../../shared/services/email.service.js';
+import { logger } from '../../shared/utils/logger.js';
+
 
 export class PaymentService extends BaseService {
-  constructor({
-    paymentRepository,
-    clientRepository,
-    subscriptionRepository = null,
-    redisService,
-  }) {
+  constructor(opts = {}) {
     super();
-    this.paymentRepository = paymentRepository;
-    this.clientRepository = clientRepository;
-    this.subscriptionRepository = subscriptionRepository;
-    this.redisService = redisService;
+    this.paymentRepository = opts.paymentRepository;
+    this.clientRepository = opts.clientRepository;
+    this.subscriptionRepository = opts.subscriptionRepository;
+    this.redisService = opts.redisService;
+    this.pdfService = opts.pdfService || null;
+    this.s3Service = opts.s3Service || null;
+    this.postPaymentQueueService = opts.postPaymentQueueService || null;
   }
 
+  /**
+   * Record a manual admin payment.
+   *
+   * Accounting model:
+   *   - If an unpaid/partially-paid invoice exists for this subscription → update it
+   *   - If no such invoice exists → create a new invoice for this payment
+   *   - Never use the full subscription price as the new invoice total when
+   *     recording a small partial payment
+   */
   async recordPayment(paymentData) {
     const {
       clientId,
@@ -56,7 +70,10 @@ export class PaymentService extends BaseService {
       }
     }
 
-    const numericAmount = Number(amount);
+    const numericAmount = roundMoney(Number(amount));
+    if (numericAmount <= 0) {
+      this.throwBadRequest('Payment amount must be greater than 0');
+    }
 
     const payload = {
       clientId,
@@ -64,7 +81,8 @@ export class PaymentService extends BaseService {
       invoiceId: invoiceId ? String(invoiceId).trim() : null,
       transactionId: transactionId ? String(transactionId).trim() : null,
       amount: numericAmount,
-      method: String(method || 'UPI').trim().toUpperCase().replace(/[\s-]+/g, '_'),
+      amountPaise: toPaise(numericAmount),
+      method: String(method || 'CASH').trim().toUpperCase().replace(/[\s-]+/g, '_'),
       status,
       paidAt: paidAtDate,
       receiptNo,
@@ -77,19 +95,21 @@ export class PaymentService extends BaseService {
 
     const payment = await this.paymentRepository.create(payload);
 
+    // ──────────────────────────────────────────────────────────────────────
     // 1. Sync Client Subscription Paid & Remaining Balances
+    // ──────────────────────────────────────────────────────────────────────
     let updatedSub = null;
     if (subscriptionId) {
       try {
         const sub = await ClientSubscriptionModel.findById(subscriptionId);
         if (sub) {
-          const currentPaid = Number(sub.paidAmount || 0);
-          const totalPlan = Number(
+          const currentPaid = roundMoney(Number(sub.paidAmount || 0));
+          const totalPlan = roundMoney(Number(
             sub.totalPlanPrice ||
             (sub.monthlyCharge ? Math.round(sub.monthlyCharge * 1.18 * 100) / 100 : numericAmount)
-          );
-          const newPaid = Math.round((currentPaid + numericAmount) * 100) / 100;
-          const newRemaining = Math.max(0, Math.round((totalPlan - newPaid) * 100) / 100);
+          ));
+          const newPaid = roundMoney(currentPaid + numericAmount);
+          const newRemaining = roundMoney(Math.max(0, totalPlan - newPaid));
 
           sub.paidAmount = newPaid;
           sub.remainingAmount = newRemaining;
@@ -98,14 +118,136 @@ export class PaymentService extends BaseService {
             sub.status = 'ACTIVE';
           }
           await sub.save();
+          if (this.subscriptionRepository) {
+            await this.subscriptionRepository.updateSubscription(subscriptionId, {
+              lastPaymentDate: paidAtDate,
+              paidAmount: newPaid,
+              remainingAmount: newRemaining
+            }).catch(() => {});
+          }
           updatedSub = sub.toJSON ? sub.toJSON() : sub;
         }
       } catch (subErr) {
-        console.error('Failed to sync subscription payment balance:', subErr);
+        logger.error({ msg: 'Failed to sync subscription payment balance', err: subErr.message });
       }
     }
 
-    // 2. Auto-generate or Update Invoice for this payment
+    // ──────────────────────────────────────────────────────────────────────
+    // 2. Reactivate client if subscription is fully paid
+    // ──────────────────────────────────────────────────────────────────────
+    const isFullyPaid = updatedSub ? (updatedSub.remainingAmount <= 0) : true;
+    if (isFullyPaid && (client.status === ClientStatus.DUE || client.status === ClientStatus.SUSPENDED || client.status === ClientStatus.OVERDUE)) {
+      await this.clientRepository.updateStatus(clientId, ClientStatus.ACTIVE).catch(() => { });
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // 3. Invalidate Redis Caches
+    // ──────────────────────────────────────────────────────────────────────
+    try {
+      await this.redisService.del('payment:summary');
+      await this.redisService.del(`client:${clientId}`);
+      await this.redisService.del('client:stats');
+    } catch {
+      // Redis optional
+    }
+
+    const clientObj = client.toJSON ? client.toJSON() : client;
+    const paymentObj = payment && payment.toJSON ? payment.toJSON() : (payment || {});
+    const paymentId = (payment._id || payment.id)?.toString();
+
+    // ──────────────────────────────────────────────────────────────────────
+    // 4. Enqueue BullMQ Post-Payment Background Jobs (Async Worker Pipeline)
+    // ──────────────────────────────────────────────────────────────────────
+    let targetInvoice = null;
+
+    if (this.postPaymentQueueService) {
+      await this.postPaymentQueueService.addAdminNotificationJob({
+        paymentId,
+        clientId: String(clientId),
+        amount: numericAmount,
+        receiptNo,
+        customerName: clientObj.userId?.name || clientObj.name || 'Client',
+        businessName: clientObj.businessName || 'Business Account',
+        planName: updatedSub?.packageTier || 'CCTV Subscription Plan',
+      }).catch((err) => {
+        logger.warn(`Could not enqueue admin notification job for payment [${paymentId}]: ${err.message}`);
+      });
+
+      await this.postPaymentQueueService.addInvoicePipelineJob({
+        paymentId,
+        clientId: String(clientId),
+        subscriptionId: subscriptionId ? String(subscriptionId) : null,
+        amount: numericAmount,
+        planName: updatedSub?.packageTier || 'CCTV Subscription Plan',
+        sessionId: receiptNo,
+        customer: {
+          name: clientObj.userId?.name || clientObj.name || 'Client',
+          phone: clientObj.userId?.phone || clientObj.phone || '',
+          email: clientObj.email || clientObj.userId?.email || '',
+          businessName: clientObj.businessName || 'Business Account',
+          address: clientObj.installationAddress?.address || '',
+          city: clientObj.installationAddress?.city || '',
+          pincode: clientObj.installationAddress?.pincode || '',
+          state: clientObj.installationAddress?.state || 'Madhya Pradesh',
+          gstin: clientObj.gstin || '',
+        },
+      }).catch((err) => {
+        logger.warn(`Could not enqueue invoice pipeline job for payment [${paymentId}]: ${err.message}`);
+      });
+    } else {
+      // Fallback for environments without BullMQ queue (e.g. Unit tests / local fallback)
+      targetInvoice = await this.#handleInlineInvoiceFallback({
+        clientId,
+        subscriptionId,
+        payment,
+        invoiceId,
+        numericAmount,
+        paidAtDate,
+        updatedSub,
+        client,
+        note,
+        payload,
+        receiptNo,
+        isFullyPaid
+      });
+    }
+
+    return {
+      success: true,
+      message: 'Payment recorded successfully. Invoice generation, PDF rendering, and email delivery queued in background.',
+      payment: {
+        ...paymentObj,
+        id: paymentObj.id || payment?._id?.toString() || paymentObj._id?.toString(),
+        clientName: clientObj.userId?.name || clientObj.name || 'Contact Person',
+        businessName: clientObj.businessName || '—',
+        receiptNo: paymentObj.receiptNo || receiptNo,
+      },
+      invoice: targetInvoice ? (targetInvoice.toJSON ? targetInvoice.toJSON() : targetInvoice) : null,
+      subscription: updatedSub,
+      client: {
+        id: clientObj.id || clientId,
+        businessName: clientObj.businessName,
+        status: isFullyPaid ? ClientStatus.ACTIVE : client.status,
+      },
+    };
+  }
+
+  /**
+   * Fallback for invoice generation and delivery when BullMQ is not configured.
+   */
+  async #handleInlineInvoiceFallback({
+    clientId,
+    subscriptionId,
+    payment,
+    invoiceId,
+    numericAmount,
+    paidAtDate,
+    updatedSub,
+    client,
+    note,
+    payload,
+    receiptNo
+  }) {
     let targetInvoice = null;
     try {
       if (invoiceId) {
@@ -118,19 +260,31 @@ export class PaymentService extends BaseService {
       }
 
       if (!targetInvoice && subscriptionId) {
-        targetInvoice = await InvoiceModel.findOne({
-          subscriptionId,
-          clientId,
-          status: { $ne: InvoiceStatus.CANCELLED },
-        }).sort({ createdAt: -1 });
+        targetInvoice = await InvoiceModel.findOne({ subscriptionId }).sort({ createdAt: 1 });
       }
 
       if (targetInvoice) {
-        const currentInvPaid = Number(targetInvoice.amountPaid || 0);
-        const newInvPaid = Math.round((currentInvPaid + numericAmount) * 100) / 100;
-        const newInvDue = Math.max(0, Math.round((targetInvoice.totalAmount - newInvPaid) * 100) / 100);
+        const hasSub = updatedSub && updatedSub.totalPlanPrice > 0;
+        if (hasSub && targetInvoice.totalAmount < updatedSub.totalPlanPrice) {
+          const gst = extractGstFromInclusive(updatedSub.totalPlanPrice, 18, false);
+          targetInvoice.subtotal = gst.baseAmount;
+          targetInvoice.taxAmount = gst.gstAmount;
+          targetInvoice.cgstAmount = gst.cgstAmount;
+          targetInvoice.sgstAmount = gst.sgstAmount;
+          targetInvoice.totalAmount = gst.totalAmount;
+          if (targetInvoice.items && targetInvoice.items.length > 0) {
+            targetInvoice.items[0].unitPrice = gst.baseAmount;
+            targetInvoice.items[0].amount = gst.baseAmount;
+          }
+        }
 
-        targetInvoice.amountPaid = newInvPaid;
+        const totalPaidOnSub = hasSub && updatedSub.paidAmount !== undefined
+          ? roundMoney(Number(updatedSub.paidAmount))
+          : roundMoney(Number(targetInvoice.amountPaid || 0) + numericAmount);
+
+        const newInvDue = roundMoney(Math.max(0, targetInvoice.totalAmount - totalPaidOnSub));
+
+        targetInvoice.amountPaid = totalPaidOnSub;
         targetInvoice.amountDue = newInvDue;
         targetInvoice.status = newInvDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
         if (newInvDue <= 0) {
@@ -139,18 +293,28 @@ export class PaymentService extends BaseService {
         if (!targetInvoice.paymentTransactionId) {
           targetInvoice.paymentTransactionId = payment._id;
         }
+        targetInvoice.pdfStatus = 'PENDING';
         await targetInvoice.save();
+
+        await this.#tryGenerateAndUploadPdf(targetInvoice, client);
       } else {
-        // Generate new Invoice
         const seq = await getNextSequenceValue('invoiceNumber');
         const invNo = `INV-${new Date().getFullYear()}-${String(seq).padStart(5, '0')}`;
-        
-        const totalInvoicePrice = updatedSub?.totalPlanPrice || numericAmount;
-        const subtotal = Math.round((totalInvoicePrice / 1.18) * 100) / 100;
-        const taxAmount = Math.round((totalInvoicePrice - subtotal) * 100) / 100;
-        const amountDue = Math.max(0, Math.round((totalInvoicePrice - numericAmount) * 100) / 100);
+
+        const hasSub = updatedSub && updatedSub.totalPlanPrice > 0;
+        const planTotal = hasSub ? roundMoney(updatedSub.totalPlanPrice) : numericAmount;
+        const totalPaidOnSub = hasSub ? roundMoney(updatedSub.paidAmount || numericAmount) : numericAmount;
+
+        const gst = extractGstFromInclusive(planTotal, 18, false);
+        const amountDue = roundMoney(Math.max(0, planTotal - totalPaidOnSub));
+        const invoiceStatus = amountDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
+
         const dueDate = new Date(paidAtDate);
         dueDate.setDate(dueDate.getDate() + 7);
+
+        const description = hasSub
+          ? `${updatedSub.packageTier || 'CCTV'} Security Subscription Service`
+          : (note || 'CCTV Security Service Payment');
 
         targetInvoice = await InvoiceModel.create({
           invoiceNumber: invNo,
@@ -160,44 +324,48 @@ export class PaymentService extends BaseService {
           paymentTransactionId: payment._id,
           items: [
             {
-              description: note || `CCTV Security Subscription Payment (${payload.method} - ${receiptNo})`,
+              description,
+              hsnSac: '998529',
               quantity: 1,
-              unitPrice: subtotal,
-              amount: subtotal,
+              unitPrice: gst.baseAmount,
+              amount: gst.baseAmount,
             },
           ],
           currency: 'INR',
-          subtotal,
+          subtotal: gst.baseAmount,
           taxPercentage: 18,
-          taxAmount,
-          totalAmount: totalInvoicePrice,
-          amountPaid: numericAmount,
+          taxAmount: gst.gstAmount,
+          cgstAmount: gst.cgstAmount,
+          sgstAmount: gst.sgstAmount,
+          igstAmount: 0,
+          totalAmount: gst.totalAmount,
+          amountPaid: totalPaidOnSub,
           amountDue,
-          status: amountDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID,
+          status: invoiceStatus,
           issueDate: paidAtDate,
           dueDate,
           paidAt: amountDue <= 0 ? paidAtDate : null,
-          pdfUrl: `/uploads/invoices/${invNo}.pdf`,
-          pdfStatus: 'COMPLETED',
-          notes: note || `Payment recorded via ${payload.method} (Ref: ${transactionId || receiptNo})`,
+          pdfStatus: 'PENDING',
+          notes: note || `Payment recorded via ${payload.method}`,
         });
+
+        await this.#tryGenerateAndUploadPdf(targetInvoice, client);
       }
 
-      if (targetInvoice && targetInvoice.invoiceNumber) {
+      if (targetInvoice && targetInvoice.invoiceNumber && payment) {
         payment.invoiceId = targetInvoice.invoiceNumber;
-        await payment.save();
+        if (typeof payment.save === 'function') {
+          await payment.save();
+        } else if ((payment._id || payment.id) && typeof this.paymentRepository?.update === 'function') {
+          await this.paymentRepository.update(payment._id || payment.id, {
+            invoiceId: targetInvoice.invoiceNumber,
+          });
+        }
       }
     } catch (invErr) {
-      console.error('Invoice auto-generation/update failed:', invErr);
+      logger.error({ msg: 'Invoice inline fallback failed', err: invErr.message });
     }
 
-    // 3. Reactivate client if subscription is fully paid or active
-    const isFullyPaid = updatedSub ? (updatedSub.remainingAmount <= 0) : true;
-    if (isFullyPaid && (client.status === ClientStatus.DUE || client.status === ClientStatus.SUSPENDED || client.status === ClientStatus.OVERDUE)) {
-      await this.clientRepository.updateStatus(clientId, ClientStatus.ACTIVE).catch(() => { });
-    }
-
-    // 4. In-App Notification to Admins
     try {
       const admins = await UserModel.find({
         role: { $in: ['SUPER_ADMIN', 'ADMIN', 'ACCOUNTS_MANAGER', 'OPERATIONS_TEAM'] },
@@ -216,40 +384,67 @@ export class PaymentService extends BaseService {
           priority: 'HIGH',
           channel: 'IN_APP',
           actionUrl: `/payments`,
-          metadata: { paymentId: payment._id, clientId, amount: numericAmount, receiptNo },
+          metadata: { paymentId: payment?._id || payment?.id, clientId, amount: numericAmount, receiptNo },
           isRead: false,
         }));
         await NotificationModel.insertMany(notifications, { ordered: false }).catch(() => {});
       }
     } catch (notifErr) {
-      console.error('Admin notification failed:', notifErr);
-    }
-
-    // 4. Redis Cache Invalidation
-    try {
-      await this.redisService.del('payment:summary');
-      await this.redisService.del(`client:${clientId}`);
-      await this.redisService.del('client:stats');
-    } catch {
-      // Redis optional
+      logger.error({ msg: 'Admin inline notification failed', err: notifErr.message });
     }
 
     const clientObj = client.toJSON ? client.toJSON() : client;
-    return {
-      payment: {
-        ...paymentObj,
-        id: paymentObj.id || payment._id?.toString(),
-        clientName: clientObj.userId?.name || 'Contact Person',
-        businessName: clientObj.businessName,
-      },
-      invoice: targetInvoice ? (targetInvoice.toJSON ? targetInvoice.toJSON() : targetInvoice) : null,
-      subscription: updatedSub,
-      client: {
-        id: clientObj.id || clientId,
-        businessName: clientObj.businessName,
-        status: isFullyPaid ? ClientStatus.ACTIVE : client.status,
-      },
-    };
+    const paymentObj = payment && payment.toJSON ? payment.toJSON() : (payment || {});
+    const recipientEmail = clientObj.email || clientObj.userId?.email;
+    if (recipientEmail) {
+      sendPaymentReceiptEmail({
+        to: recipientEmail,
+        client: clientObj,
+        payment: paymentObj,
+        invoice: targetInvoice ? (targetInvoice.toJSON ? targetInvoice.toJSON() : targetInvoice) : null,
+        pdfUrl: targetInvoice?.pdfUrl || null,
+      }).catch(err => logger.error(`Record payment inline email notification failed: ${err.message}`));
+    }
+
+    return targetInvoice;
+  }
+
+  /**
+   * Generate PDF and upload to S3. Updates invoice record on success.
+   * Safe — never throws, logs errors instead.
+   */
+  async #tryGenerateAndUploadPdf(invoice, client) {
+    if (process.env.NODE_ENV === 'test' && !this.pdfService) return;
+    try {
+      const pdfService = this.pdfService || new PdfService();
+      const s3Service = this.s3Service || new S3Service();
+
+      // Populate client data for PDF rendering
+      const clientData = client?.toJSON ? client.toJSON() : client;
+      const pdfBuffer = await pdfService.generateInvoicePdfBuffer(invoice, clientData);
+
+      if (!pdfBuffer || pdfBuffer.length === 0) {
+        logger.warn(`PDF generation returned empty buffer for invoice ${invoice.invoiceNumber}`);
+        return;
+      }
+
+      const cloudUrl = await s3Service.uploadFile(
+        pdfBuffer,
+        `invoices/${invoice.invoiceNumber}.pdf`,
+        'application/pdf'
+      );
+
+      if (cloudUrl) {
+        invoice.pdfUrl = cloudUrl;
+        invoice.pdfStatus = 'COMPLETED';
+        invoice.pdfGeneratedAt = new Date();
+        await invoice.save();
+        logger.info({ msg: 'PDF generated and uploaded successfully', invoiceNumber: invoice.invoiceNumber, pdfUrl: cloudUrl });
+      }
+    } catch (pdfErr) {
+      logger.warn({ msg: 'PDF generation/upload failed, will retry via worker', invoiceNumber: invoice.invoiceNumber, err: pdfErr.message });
+      // Don't set a fake URL — leave pdfStatus as PENDING for worker retry
+    }
   }
 
   async getPaymentById(id) {

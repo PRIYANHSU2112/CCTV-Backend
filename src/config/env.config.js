@@ -26,12 +26,13 @@ export const env = {
   REFRESH_TOKEN_EXPIRES_IN: process.env.REFRESH_TOKEN_EXPIRES_IN || '7d',
   ENCRYPTION_KEY: process.env.ENCRYPTION_KEY || '12345678901234567890123456789012', // 32 chars for AES-256
 
-  // AWS S3 / DigitalOcean Spaces Storage Configuration
-  AWS_ENDPOINT: process.env.AWS_ENDPOINT || process.env.DO_SPACES_ENDPOINT || '',
-  AWS_REGION: process.env.AWS_REGION || 'sgp1',
-  AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID || '',
-  AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY || '',
-  AWS_S3_BUCKET: process.env.AWS_S3_BUCKET || 'cctv-backend-storage',
+  // AWS S3 / DigitalOcean Spaces / Linode Object Storage Configuration
+  AWS_ENDPOINT: process.env.LINODE_OBJECT_STORAGE_ENDPOINT || process.env.AWS_ENDPOINT || process.env.DO_SPACES_ENDPOINT || 'https://sgp1.digitaloceanspaces.com',
+  AWS_REGION: process.env.LINODE_OBJECT_STORAGE_REGION || process.env.AWS_REGION || 'sgp1',
+  AWS_ACCESS_KEY_ID: process.env.LINODE_OBJECT_STORAGE_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || 'DO003NRRKMN4DTETPLGA',
+  AWS_SECRET_ACCESS_KEY: process.env.LINODE_OBJECT_STORAGE_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || 'M5kmv62vtYMFrOwv2duhltYAAHLo26BbGeckKaG1lfE',
+  AWS_S3_BUCKET: process.env.LINODE_OBJECT_BUCKET || process.env.AWS_S3_BUCKET || process.env.DO_SPACES_BUCKET || 'satyakabir-bucket',
+  BUCKET_FOLDER_PATH: process.env.BUCKET_FOLDER_PATH || 'CCTV/',
 
   // Pino Logger
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
@@ -41,8 +42,27 @@ export const env = {
   RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET || 'wg33MCoTYvfPf28NHg5uK6Qi',
   RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   CHECKOUT_SESSION_TTL_MINUTES: parseInt(process.env.CHECKOUT_SESSION_TTL_MINUTES || '30', 10),
+  RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || (process.env.NODE_ENV === 'production' ? '1000' : '5000'), 10),
+  RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
 
   isDev: (process.env.NODE_ENV || 'development') === 'development',
   isProd: process.env.NODE_ENV === 'production',
-  isTest: process.env.NODE_ENV === 'test'
+  isTest: process.env.NODE_ENV === 'test',
+
+  // Application Public URL for full static / invoice links
+  APP_URL: process.env.APP_URL || process.env.API_BASE_URL || process.env.BACKEND_URL || `http://localhost:${process.env.PORT || '5000'}`
 };
+
+/**
+ * Format full absolute URL for generated invoice PDFs
+ */
+export function getFullPdfUrl(fileNameOrPath) {
+  if (!fileNameOrPath) return null;
+  if (typeof fileNameOrPath !== 'string') return fileNameOrPath;
+  if (fileNameOrPath.startsWith('http://') || fileNameOrPath.startsWith('https://')) {
+    return fileNameOrPath;
+  }
+  const cleanPath = fileNameOrPath.startsWith('/') ? fileNameOrPath : `/uploads/invoices/${fileNameOrPath}`;
+  const baseUrl = (env.APP_URL || `http://localhost:${env.PORT || 5000}`).replace(/\/$/, '');
+  return `${baseUrl}${cleanPath}`;
+}

@@ -1,9 +1,6 @@
-import fs from 'fs';
-import path from 'path';
 import { PDF_QUEUE_NAME } from './pdf-queue.service.js';
 import { InvoiceModel, PdfStatus } from './invoice.model.js';
 import { S3Service } from '../../shared/storage/s3.service.js';
-import { env } from '../../config/env.config.js';
 import { logger } from '../../shared/utils/logger.js';
 
 let Worker = null;
@@ -29,12 +26,6 @@ export class PdfWorker {
       ? redisClient.duplicate({ maxRetriesPerRequest: null, enableOfflineQueue: true })
       : { host: process.env.REDIS_HOST || 'redis', port: Number(process.env.REDIS_PORT || 6379), maxRetriesPerRequest: null };
 
-    // Ensure uploads/invoices output directory exists for fallback
-    this.outputDir = path.resolve(process.cwd(), 'uploads', 'invoices');
-    if (!fs.existsSync(this.outputDir)) {
-      fs.mkdirSync(this.outputDir, { recursive: true });
-    }
-
     this.worker = new Worker(
       PDF_QUEUE_NAME,
       async (job) => {
@@ -42,7 +33,7 @@ export class PdfWorker {
       },
       {
         connection,
-        concurrency: 3 // Render up to 3 PDFs concurrently
+        concurrency: 3 // Render up to 3 PDFs concurrently in-memory
       }
     );
 
@@ -59,7 +50,7 @@ export class PdfWorker {
 
   async processJob(job) {
     const { invoiceId } = job.data;
-    logger.info(`⚙️ Processing PDF Generation for Invoice ID: [${invoiceId}]`);
+    logger.info(`⚙️ Processing Cloud PDF Generation for Invoice ID: [${invoiceId}]`);
 
     const invoice = await InvoiceModel.findById(invoiceId);
     if (!invoice) {
@@ -73,24 +64,23 @@ export class PdfWorker {
     try {
       const client = invoice.clientId ? await this.clientRepository.findById(invoice.clientId) : null;
 
-      // Render HTML template to PDF Buffer using Puppeteer inside Worker container
+      // Render HTML template to in-memory PDF Buffer using Puppeteer
       const pdfBuffer = await this.pdfService.generateInvoicePdfBuffer(invoice, client);
+      if (!pdfBuffer || pdfBuffer.length === 0) {
+        throw new Error('Puppeteer generated an empty PDF buffer');
+      }
+
       const fileName = `${invoice.invoiceNumber || `INV-${invoiceId}`}.pdf`;
 
-      let pdfUrl;
+      // Upload in-memory buffer directly to DigitalOcean Spaces / S3
+      logger.info(`☁️ Uploading PDF directly to Cloud Storage for invoice [${fileName}]...`);
+      const pdfUrl = await this.s3Service.uploadFile(pdfBuffer, `invoices/${fileName}`, 'application/pdf');
 
-      // Upload directly to AWS S3 if credentials are provided in env
-      if (env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY) {
-        logger.info(`☁️ Uploading PDF directly to AWS S3 Bucket [${env.AWS_S3_BUCKET}]...`);
-        pdfUrl = await this.s3Service.uploadFile(pdfBuffer, `invoices/${fileName}`, 'application/pdf');
-        logger.info(`🎉 PDF Successfully Uploaded to AWS S3: [${pdfUrl}]`);
-      } else {
-        // Fallback to local storage if AWS credentials are not set
-        const filePath = path.join(this.outputDir, fileName);
-        fs.writeFileSync(filePath, pdfBuffer);
-        pdfUrl = `/uploads/invoices/${fileName}`;
-        logger.info(`🎉 PDF Successfully Generated & Saved Locally: [${pdfUrl}]`);
+      if (!pdfUrl) {
+        throw new Error('Cloud storage upload returned an empty URL');
       }
+
+      logger.info(`🎉 Cloud PDF Successfully Uploaded: [${pdfUrl}]`);
 
       invoice.pdfUrl = pdfUrl;
       invoice.pdfStatus = PdfStatus.COMPLETED;
@@ -98,17 +88,36 @@ export class PdfWorker {
       invoice.pdfGeneratedAt = new Date();
       await invoice.save();
 
+      // Dispatch email notification with the attached PDF buffer
+      const recipientEmail = client?.email || (client?.userId && typeof client.userId === 'object' ? client.userId.email : null);
+      if (recipientEmail) {
+        try {
+          const { sendInvoiceEmail } = await import('../../shared/services/email.service.js');
+          await sendInvoiceEmail({
+            to: recipientEmail,
+            client: client || { name: invoice.clientName, email: recipientEmail },
+            invoice,
+            pdfBuffer,
+            pdfUrl,
+          });
+        } catch (emailErr) {
+          logger.warn(`Could not dispatch PDF email to [${recipientEmail}]: ${emailErr.message}`);
+        }
+      }
+
       return { success: true, pdfUrl };
     } catch (err) {
       invoice.pdfStatus = PdfStatus.FAILED;
       invoice.pdfFailureReason = err.message;
       await invoice.save();
-      logger.error(`❌ PDF Generation Failed for Invoice [${invoiceId}]: ${err.message}`);
+      logger.error(`❌ PDF Generation/Cloud Upload Failed for Invoice [${invoiceId}]: ${err.message}`);
       throw err;
     }
   }
 
   async close() {
-    await this.worker.close();
+    if (this.worker) {
+      await this.worker.close();
+    }
   }
 }

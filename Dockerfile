@@ -1,6 +1,19 @@
 # ---------- API Container (Default Fallback to Dockerfile.api) ----------
 FROM node:20-alpine AS base
 
+# Install Chromium and system dependencies required for Puppeteer on Alpine
+RUN apk add --no-cache \
+      chromium \
+      nss \
+      freetype \
+      harfbuzz \
+      ca-certificates \
+      ttf-freefont
+
+# Consistent Puppeteer executable path for Alpine Linux
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
 WORKDIR /app
 
 # Install dependencies first for layer caching

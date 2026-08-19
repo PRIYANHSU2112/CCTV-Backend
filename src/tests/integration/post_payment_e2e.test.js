@@ -22,10 +22,11 @@ import { PostPaymentWorkers } from '../../shared/queues/post-payment.workers.js'
 import { PdfService } from '../../modules/invoice/pdf.service.js';
 import { PdfWorker } from '../../modules/invoice/pdf.worker.js';
 
-async function runPostPaymentE2ETest() {
-  console.log('===========================================================');
-  console.log('🧪 Starting End-to-End Post-Payment Workflow Integration Test');
-  console.log('===========================================================');
+describe('End-to-End Post-Payment Workflow Integration', () => {
+  test('Complete Checkout -> Payment -> Invoice Pipeline -> Notification Flow', async () => {
+    console.log('===========================================================');
+    console.log('🧪 Starting End-to-End Post-Payment Workflow Integration Test');
+    console.log('===========================================================');
 
   try {
     // 1. Connect MongoDB Database
@@ -261,13 +262,8 @@ async function runPostPaymentE2ETest() {
     console.log('🎉 ALL INTEGRATION TESTS PASSED 100% SUCCESSFULLY!');
     console.log('===========================================================');
 
-  } catch (err) {
-    console.error('\n❌ E2E Integration Test Failed:', err.message);
-    console.error(err.stack);
   } finally {
     await disconnectDatabase();
-    process.exit(0);
   }
-}
-
-runPostPaymentE2ETest();
+  }, 60000);
+});

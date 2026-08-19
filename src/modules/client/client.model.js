@@ -42,6 +42,14 @@ const clientSchema = new mongoose.Schema(
       maxlength: [150, 'Business name cannot exceed 150 characters'],
       index: true
     },
+    email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      sparse: true,
+      index: true,
+      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address']
+    },
     gstin: {
       type: String,
       trim: true,

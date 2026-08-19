@@ -7,6 +7,9 @@ import { PaymentController } from './payment.controller.js';
 import { createPaymentRouter } from './payment.routes.js';
 import { paymentSwaggerDocs } from './payment.swagger.js';
 
+import { PdfService } from '../invoice/pdf.service.js';
+import { S3Service } from '../../shared/storage/s3.service.js';
+
 export const initPaymentModule = ({
   redisService,
   clientRepository,
@@ -27,6 +30,8 @@ export const initPaymentModule = ({
   });
 
   moduleContainer.register({
+    pdfService: asClass(PdfService).singleton(),
+    s3Service: asClass(S3Service).singleton(),
     razorpayService: asClass(RazorpayService).singleton(),
     paymentRepository: asClass(PaymentRepository).singleton(),
     paymentService: asClass(PaymentService).scoped(),

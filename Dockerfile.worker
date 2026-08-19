@@ -1,4 +1,4 @@
-# ---------- Background Worker Container (Chromium & Puppeteer) ----------
+# ---------- Background Worker Container (Chromium & Puppeteer & BullMQ) ----------
 FROM node:20-alpine AS base
 
 # Install Chromium and system dependencies required for Puppeteer on Alpine

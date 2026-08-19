@@ -26,6 +26,7 @@ export const invoiceSwaggerDocs = {
                       required: ['description', 'quantity', 'unitPrice'],
                       properties: {
                         description: { type: 'string', example: 'CCTV Camera Installation & Maintenance' },
+                        hsnSac: { type: 'string', example: '998529' },
                         quantity: { type: 'number', example: 2 },
                         unitPrice: { type: 'number', example: 1500 }
                       }

@@ -31,8 +31,15 @@ export class InvoiceController extends BaseController {
   });
 
   downloadInvoicePdf = this.catchAsync(async (req, res) => {
-    const { absolutePath, invoiceNumber } = await this.invoiceService.ensureInvoicePdfFile(req.params.id);
-    return res.download(absolutePath, `${invoiceNumber}.pdf`);
+    const invoice = await this.invoiceService.getInvoiceById(req.params.id);
+    if (invoice?.pdfUrl && invoice.pdfUrl.startsWith('http')) {
+      return res.redirect(invoice.pdfUrl);
+    }
+    const { pdfUrl } = await this.invoiceService.ensureInvoicePdfFile(req.params.id);
+    if (pdfUrl && pdfUrl.startsWith('http')) {
+      return res.redirect(pdfUrl);
+    }
+    return this.sendNotFound(res, 'Invoice PDF is still generating. Please try again shortly.');
   });
 
   emailInvoice = this.catchAsync(async (req, res) => {

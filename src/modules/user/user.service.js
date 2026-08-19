@@ -4,6 +4,8 @@ import { UnauthorizedError } from '../../shared/errors/unauthorized.error.js';
 import { SystemConstants } from '../../shared/constants/system.constant.js';
 import { UserRole, UserStatus } from '../../shared/constants/enum.constant.js';
 import { TokenService } from '../../shared/security/token.service.js';
+import { sendOtpSms } from '../../shared/services/msg91.service.js';
+import { logger } from '../../shared/utils/logger.js';
 
 export class UserService extends BaseService {
   constructor({ userRepository, hashService, redisService }) {
@@ -35,25 +37,30 @@ export class UserService extends BaseService {
 
     // Check duplicate email if provided
     if (email) {
-      const existingEmail = await this.userRepository.findByEmail(email);
+      const existingEmail = await this.userRepository.findByUsernameOrEmail(email);
       if (existingEmail) {
         throw new ConflictError(`User with email '${email}' already exists`);
       }
     }
 
-    const hashedPassword = await this.hashService.hashPassword(password);
+    // Hash password if provided
+    let passwordHash;
+    if (password) {
+      passwordHash = await this.hashService.hashPassword(password);
+    }
 
-    const user = await this.userRepository.create({
+    const newUser = await this.userRepository.create({
       name,
       phone: phone.trim(),
       username: username ? username.trim().toLowerCase() : undefined,
       email: email ? email.trim().toLowerCase() : undefined,
-      password: hashedPassword,
+      passwordHash,
       role: role || UserRole.CLIENT,
       status: status || UserStatus.ACTIVE
     });
 
-    const userObj = user.toJSON ? user.toJSON() : user;
+    const userObj = newUser.toJSON ? newUser.toJSON() : newUser;
+    delete userObj.passwordHash;
 
     const cacheKey = `user:${userObj.id}`;
     await this.redisService.set(cacheKey, userObj, SystemConstants.CACHE_TTL.SHORT);
@@ -62,12 +69,21 @@ export class UserService extends BaseService {
   }
 
   /**
-   * Client Mobile Login: Login via Mobile Number + Password
+   * User Authentication: Login via Phone/Email/Username + Password
    */
-  async loginByMobile({ phone, password }) {
-    const user = await this.userRepository.findByPhone(phone, true);
+  async login({ login, password }) {
+    const user = await this.userRepository.findByLogin(login);
     if (!user) {
-      throw new UnauthorizedError('Invalid mobile number or password');
+      throw new UnauthorizedError('Invalid credentials');
+    }
+
+    if (!user.password && !user.passwordHash) {
+      throw new UnauthorizedError('Password login not configured for this account. Please use OTP login.');
+    }
+
+    const isPasswordValid = await this.hashService.comparePassword(password, user.password || user.passwordHash);
+    if (!isPasswordValid) {
+      throw new UnauthorizedError('Invalid credentials');
     }
 
     if (user.status === UserStatus.SUSPENDED) {
@@ -78,14 +94,11 @@ export class UserService extends BaseService {
       throw new UnauthorizedError('Account is inactive.');
     }
 
-    const isPasswordValid = await this.hashService.comparePassword(password, user.password);
-    if (!isPasswordValid) {
-      throw new UnauthorizedError('Invalid mobile number or password');
-    }
-
     await this.userRepository.updateLastLogin(user._id);
 
     const userObj = user.toJSON ? user.toJSON() : user;
+    delete userObj.password;
+    delete userObj.passwordHash;
     userObj.lastLogin = new Date();
 
     const tokens = TokenService.generateAuthTokens(userObj);
@@ -97,21 +110,32 @@ export class UserService extends BaseService {
   }
 
   /**
-   * Send Mobile OTP (Static 1234 for testing)
+   * Send Real Mobile OTP via MSG91 (No static mock OTP leaks)
    */
   async sendOtp({ phone }) {
-    const formattedPhone = phone.trim();
-    const staticOtp = '1234';
+    const cleanDigits = String(phone || '').replace(/\D/g, '');
+    const plain10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
+    
+    // Generate secure 6-digit OTP
+    const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
 
-    const cacheKey = `otp:${formattedPhone}`;
+    // Cache in Redis for 5 minutes (300 seconds)
     if (this.redisService && this.redisService.set) {
-      await this.redisService.set(cacheKey, staticOtp, 300);
+      await this.redisService.set(`otp:${plain10}`, generatedOtp, 300);
+      if (phone && phone !== plain10) {
+        await this.redisService.set(`otp:${phone}`, generatedOtp, 300);
+      }
     }
 
+    // Send real SMS via MSG91 (requires country code prefix for delivery)
+    const msg91Phone = `91${plain10}`;
+    const smsResult = await sendOtpSms(msg91Phone, generatedOtp);
+    logger.info(`[Auth OTP] Dispatched OTP to mobile ${plain10} (MSG91 destination: ${msg91Phone}). Success: ${smsResult.success}`);
+
     return {
-      message: 'OTP sent successfully',
-      phone: formattedPhone,
-      otp: staticOtp
+      success: true,
+      message: 'OTP sent successfully to your mobile number',
+      phone: plain10
     };
   }
 
@@ -119,32 +143,41 @@ export class UserService extends BaseService {
    * Login or Register via Mobile Phone + OTP
    */
   async loginByOtp({ phone, otp }) {
-    const formattedPhone = phone.trim();
+    const cleanDigits = String(phone || '').replace(/\D/g, '');
+    const plain10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
     const providedOtp = String(otp).trim();
-    const staticOtp = '1234';
 
-    let isValidOtp = providedOtp === staticOtp;
+    let isValidOtp = false;
 
-    if (!isValidOtp && this.redisService && this.redisService.get) {
-      const storedOtp = await this.redisService.get(`otp:${formattedPhone}`);
-      if (storedOtp && String(storedOtp) === providedOtp) {
+    if (this.redisService && this.redisService.get) {
+      const storedOtp = (await this.redisService.get(`otp:${plain10}`)) || (await this.redisService.get(`otp:${phone}`));
+      if (storedOtp && String(storedOtp).trim() === providedOtp) {
         isValidOtp = true;
+        // Invalidate OTP immediately after successful verification
+        await this.redisService.del(`otp:${plain10}`).catch(() => {});
+        if (phone && phone !== plain10) {
+          await this.redisService.del(`otp:${phone}`).catch(() => {});
+        }
       }
     }
 
     if (!isValidOtp) {
-      throw new UnauthorizedError('Invalid or expired OTP. Please use OTP 1234');
+      throw new UnauthorizedError('Invalid or expired OTP. Please enter the valid OTP sent to your phone.');
     }
 
-    let user = await this.userRepository.findByPhone(formattedPhone, true);
+    let user = await this.userRepository.findByPhone(plain10, true);
 
     if (!user) {
       user = await this.userRepository.create({
-        name: `User ${formattedPhone.slice(-4)}`,
-        phone: formattedPhone,
+        name: `User ${plain10.slice(-4)}`,
+        phone: plain10,
         role: UserRole.CLIENT,
         status: UserStatus.ACTIVE
       });
+    } else if (user.phone !== plain10) {
+      // Auto-migrate legacy user phone to clean 10 digits
+      user.phone = plain10;
+      await user.save().catch(() => {});
     }
 
     if (user.status === UserStatus.SUSPENDED) {
@@ -171,6 +204,8 @@ export class UserService extends BaseService {
   /**
    * Administration Login: Login via Username / Email + Password
    */
+
+
   async loginByAdmin({ username, password }) {
     let user = await this.userRepository.findByUsernameOrEmail(username, true);
     if (!user) {
@@ -338,7 +373,7 @@ export class UserService extends BaseService {
    * Paginated Users Listing with MongoDB Aggregation & Filters
    */
   async listUsers(queryParams = {}) {
-    const { page: qPage, limit: qLimit, search, role, status, staffOnly, sortBy, sortOrder } = queryParams;
+    const { page: qPage, limit: qLimit, search, role, status, sortBy, sortOrder } = queryParams;
     const { page, limit, skip } = this.getPaginationParams(qPage, qLimit);
 
     const { items, total } = await this.userRepository.findPaginatedWithAggregation({
@@ -347,7 +382,6 @@ export class UserService extends BaseService {
       search,
       role,
       status,
-      staffOnly: staffOnly !== undefined ? String(staffOnly) === 'true' : true,
       sortBy,
       sortOrder
     });

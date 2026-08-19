@@ -1,4 +1,6 @@
 import mongoose from 'mongoose';
+import { getFullPdfUrl } from '../../config/env.config.js';
+import { roundMoney } from '../../shared/utils/money.util.js';
 
 /**
  * Invoice Status Enum
@@ -6,12 +8,14 @@ import mongoose from 'mongoose';
 export const InvoiceStatus = Object.freeze({
   DRAFT: 'DRAFT',
   SENT: 'SENT',
+  ISSUED: 'ISSUED',
   UNPAID: 'UNPAID',
   PAID: 'PAID',
   PARTIALLY_PAID: 'PARTIALLY_PAID',
   OVERDUE: 'OVERDUE',
   CANCELLED: 'CANCELLED',
-  VOID: 'VOID'
+  VOID: 'VOID',
+  PENDING: 'PENDING'
 });
 
 /**
@@ -80,6 +84,12 @@ const invoiceItemSchema = new mongoose.Schema(
       type: Number,
       required: [true, 'Unit price is required'],
       min: [0, 'Unit price cannot be negative']
+    },
+    hsnSac: {
+      type: String,
+      trim: true,
+      default: '998529',
+      maxlength: [10, 'HSN/SAC code cannot exceed 10 characters']
     },
     amount: {
       type: Number,
@@ -153,6 +163,22 @@ const invoiceSchema = new mongoose.Schema(
       type: Number,
       default: 0,
       min: [0, 'Tax amount cannot be negative']
+    },
+    // Explicit CGST/SGST/IGST storage — never recalculated in the PDF template
+    cgstAmount: {
+      type: Number,
+      default: 0,
+      min: [0, 'CGST amount cannot be negative']
+    },
+    sgstAmount: {
+      type: Number,
+      default: 0,
+      min: [0, 'SGST amount cannot be negative']
+    },
+    igstAmount: {
+      type: Number,
+      default: 0,
+      min: [0, 'IGST amount cannot be negative']
     },
     discountAmount: {
       type: Number,
@@ -242,17 +268,51 @@ const invoiceSchema = new mongoose.Schema(
   }
 );
 
+/**
+ * Pre-validate hook — computes item amounts and invoice totals.
+ *
+ * IMPORTANT: If the caller has already set taxAmount, cgstAmount, sgstAmount,
+ * totalAmount explicitly, this hook respects those values and only fills in
+ * missing fields. This prevents the double-tax bug where a GST-inclusive
+ * amount gets taxed again.
+ */
 invoiceSchema.pre('validate', function (next) {
   if (this.items && this.items.length > 0) {
+    // Always recompute item-level amounts from unitPrice × quantity
     this.items.forEach((item) => {
-      item.amount = (item.quantity || 1) * (item.unitPrice || 0);
+      if (!item.hsnSac || !item.hsnSac.trim()) {
+        item.hsnSac = '998529';
+      }
+      item.amount = roundMoney((item.quantity || 1) * (item.unitPrice || 0));
     });
 
-    this.subtotal = this.items.reduce((sum, item) => sum + item.amount, 0);
-    this.taxAmount = (this.subtotal * (this.taxPercentage || 0)) / 100;
-    this.totalAmount = Math.max(0, this.subtotal + this.taxAmount - (this.discountAmount || 0));
-    this.amountDue = Math.max(0, this.totalAmount - (this.amountPaid || 0));
+    // Subtotal = sum of all item amounts
+    this.subtotal = roundMoney(this.items.reduce((sum, item) => sum + item.amount, 0));
+
+    // Only compute tax fields if the caller has NOT explicitly provided them
+    const callerSetTax = (this.taxAmount > 0) || (this.cgstAmount > 0) || (this.sgstAmount > 0) || (this.igstAmount > 0);
+    if (!callerSetTax && this.subtotal > 0) {
+      const rate = this.taxPercentage || 0;
+      this.taxAmount = roundMoney((this.subtotal * rate) / 100);
+      this.cgstAmount = roundMoney(Math.floor(this.taxAmount * 100 / 2) / 100);
+      this.sgstAmount = roundMoney(this.taxAmount - this.cgstAmount);
+      this.igstAmount = 0;
+    }
+
+    // Total = subtotal + tax - discount
+    this.totalAmount = roundMoney(
+      Math.max(0, this.subtotal + (this.taxAmount || 0) - (this.discountAmount || 0))
+    );
+
+    // Amount due = total - paid
+    this.amountDue = roundMoney(Math.max(0, this.totalAmount - (this.amountPaid || 0)));
   }
+
+  // Convert relative paths to full cloud URLs
+  if (this.pdfUrl && typeof this.pdfUrl === 'string' && this.pdfUrl.startsWith('/uploads/')) {
+    this.pdfUrl = getFullPdfUrl(this.pdfUrl);
+  }
+
   next();
 });
 

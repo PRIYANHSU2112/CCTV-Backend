@@ -14,6 +14,7 @@ import {
   CheckoutSessionStatus,
 } from '../../shared/constants/enum.constant.js';
 import { normalizeGstin } from '../../shared/utils/gstin.util.js';
+import { roundMoney, toPaise, toRupees } from '../../shared/utils/money.util.js';
 import { CheckoutSessionModel } from './checkout-session.model.js';
 import { NotificationModel } from '../notification/notification.model.js';
 import { UserModel } from '../user/user.model.js';
@@ -75,14 +76,14 @@ export class CheckoutService extends BaseService {
       }
     }
 
-    const fullPlanPrice = Number(plan.totalPrice);
-    const customAmountNum = payload.customAmount ? Number(payload.customAmount) : 0;
+    const fullPlanPrice = roundMoney(Number(plan.totalPrice));
+    const customAmountNum = payload.customAmount ? roundMoney(Number(payload.customAmount)) : 0;
     const amount = customAmountNum > 0 ? customAmountNum : fullPlanPrice;
     if (!(amount > 0)) {
       this.throwBadRequest('Plan price is invalid');
     }
-    const remainingAmount = Math.max(0, Math.round((fullPlanPrice - amount) * 100) / 100);
-    const amountPaise = Math.round(amount * 100);
+    const remainingAmount = roundMoney(Math.max(0, fullPlanPrice - amount));
+    const amountPaise = toPaise(amount);
     const sessionId = randomUUID().replace(/-/g, '');
     const ttlMin = env.CHECKOUT_SESSION_TTL_MINUTES || 30;
     const expiresAt = new Date(Date.now() + ttlMin * 60 * 1000);
@@ -100,8 +101,7 @@ export class CheckoutService extends BaseService {
     const startDate = new Date();
     const renewalDate = new Date(startDate);
     renewalDate.setMonth(renewalDate.getMonth() + months);
-    const monthlyCharge =
-      Math.round((amount / Math.max(1, months)) * 100) / 100;
+    const monthlyCharge = roundMoney(amount / Math.max(1, months));
 
     const booked = await withMongoTransaction(async (session) => {
       let user = await this.userRepository.findByPhone(customer.phone, false, {
@@ -120,6 +120,20 @@ export class CheckoutService extends BaseService {
           },
           { session },
         );
+      } else {
+        const userUpdates = {};
+        if (customer.name && (!user.name || user.name.startsWith('User '))) {
+          userUpdates.name = customer.name;
+        }
+        if (customer.email && (!user.email || user.email !== customer.email)) {
+          userUpdates.email = customer.email;
+        }
+        if (user.phone !== customer.phone) {
+          userUpdates.phone = customer.phone;
+        }
+        if (Object.keys(userUpdates).length > 0) {
+          await this.userRepository.update(user._id, userUpdates, { session }).catch(() => {});
+        }
       }
 
       let client = await this.clientRepository.findByUserId(user._id, {
@@ -130,6 +144,7 @@ export class CheckoutService extends BaseService {
         client = await this.clientRepository.create(
           {
             userId: user._id,
+            email: customer.email || user.email || undefined,
             businessName: customer.businessName,
             gstin: customer.gstin || undefined,
             installationAddress: {
@@ -142,6 +157,21 @@ export class CheckoutService extends BaseService {
           },
           { session },
         );
+      } else {
+        const clientUpdates = {};
+        if (customer.email && (!client.email || client.email !== customer.email)) {
+          clientUpdates.email = customer.email;
+        }
+        if (customer.businessName && client.businessName !== customer.businessName) {
+          clientUpdates.businessName = customer.businessName;
+        }
+        if (Object.keys(clientUpdates).length > 0) {
+          await this.clientRepository.update(
+            client._id || client.id,
+            clientUpdates,
+            { session }
+          ).catch(() => {});
+        }
       }
 
       const subscription = await this.subscriptionRepository.createSubscription(
@@ -274,19 +304,19 @@ export class CheckoutService extends BaseService {
       this.throwNotFound('Subscription');
     }
 
-    const remaining = Number(existingSub.remainingAmount || 0);
+    const remaining = roundMoney(Number(existingSub.remainingAmount || 0));
     if (remaining <= 0) {
       this.throwBadRequest('No outstanding balance to pay on this subscription');
     }
 
-    const customAmountNum = Number(payload.customAmount);
+    const customAmountNum = payload.customAmount ? roundMoney(Number(payload.customAmount)) : 0;
     const amount = (customAmountNum > 0 && customAmountNum <= remaining)
-      ? Math.round(customAmountNum * 100) / 100
+      ? customAmountNum
       : remaining;
 
-    const remainingAfterPayment = Math.max(0, Math.round((remaining - amount) * 100) / 100);
-    const fullPlanPrice = Number(existingSub.totalPlanPrice || plan.totalPrice);
-    const amountPaise = Math.round(amount * 100);
+    const remainingAfterPayment = roundMoney(Math.max(0, remaining - amount));
+    const fullPlanPrice = roundMoney(Number(existingSub.totalPlanPrice || plan.totalPrice));
+    const amountPaise = toPaise(amount);
     const sessionId = randomUUID().replace(/-/g, '');
     const ttlMin = env.CHECKOUT_SESSION_TTL_MINUTES || 30;
     const expiresAt = new Date(Date.now() + ttlMin * 60 * 1000);
@@ -313,7 +343,7 @@ export class CheckoutService extends BaseService {
     const customer = {
       name: userRef?.name || payload.name || 'Client',
       phone: userRef?.phone || payload.phone || '0000000000',
-      email: userRef?.email || payload.email || '',
+      email: client.email || userRef?.email || payload.email || '',
       businessName: client.businessName || payload.businessName || 'Business',
       address: installAddr.address || payload.address || 'N/A',
       city: installAddr.city || payload.city || 'N/A',
@@ -463,9 +493,9 @@ export class CheckoutService extends BaseService {
       if (isBalancePayment) {
         // Update existing subscription's paidAmount and recalculate remainingAmount accurately
         const existingSub = await this.subscriptionRepository.findSubscriptionById(subscriptionId);
-        const totalPlanPrice = Number(existingSub?.totalPlanPrice || checkout.planTotalPrice || 0);
-        const newPaidAmount = Math.round((Number(existingSub?.paidAmount || 0) + Number(checkout.amount)) * 100) / 100;
-        const newRemainingAmount = Math.max(0, Math.round((totalPlanPrice - newPaidAmount) * 100) / 100);
+        const totalPlanPrice = roundMoney(Number(existingSub?.totalPlanPrice || checkout.planTotalPrice || 0));
+        const newPaidAmount = roundMoney(Number(existingSub?.paidAmount || 0) + Number(checkout.amount));
+        const newRemainingAmount = roundMoney(Math.max(0, totalPlanPrice - newPaidAmount));
 
         await this.subscriptionRepository.updateSubscription(
           subscriptionId,
@@ -511,7 +541,7 @@ export class CheckoutService extends BaseService {
     }
 
     if (!activated.alreadyPaid) {
-      this.#enqueuePostPaymentJobs(activated.checkout).catch(() => {});
+      this.#enqueuePostPaymentJobs(activated.checkout).catch(() => { });
     }
 
     return this.#buildSuccessPayload(activated.checkout);
@@ -664,7 +694,7 @@ export class CheckoutService extends BaseService {
         await doc.save({ session });
       });
 
-      this.#enqueuePostPaymentJobs(checkout).catch(() => {});
+      this.#enqueuePostPaymentJobs(checkout).catch(() => { });
       return { handled: true, status: 'PAID' };
     }
 
@@ -720,7 +750,7 @@ export class CheckoutService extends BaseService {
             metadata: { paymentId, clientId, amount, planName, sessionId },
             isRead: false,
           }));
-          await NotificationModel.insertMany(notifications, { ordered: false }).catch(() => {});
+          await NotificationModel.insertMany(notifications, { ordered: false }).catch(() => { });
         }
       } catch (directNotifErr) {
         // Direct notification best-effort
@@ -736,7 +766,7 @@ export class CheckoutService extends BaseService {
           sessionId,
           customerName: customer.name,
           businessName: customer.businessName
-        }).catch(() => {});
+        }).catch(() => { });
 
         await this.postPaymentQueueService.addInvoicePipelineJob({
           paymentId,
@@ -746,7 +776,7 @@ export class CheckoutService extends BaseService {
           planName,
           sessionId,
           customer
-        }).catch(() => {});
+        }).catch(() => { });
       }
     } catch {
       // Non-blocking background job enqueuing
@@ -754,7 +784,9 @@ export class CheckoutService extends BaseService {
   }
 
   #normalizeCustomer(payload) {
-    const phone = String(payload.phone || '').trim();
+    const rawPhone = String(payload.phone || '').trim();
+    const cleanDigits = rawPhone.replace(/\D/g, '');
+    const phone = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
     const name = String(payload.name || '').trim();
     const businessName = String(payload.businessName || '').trim();
     const address = String(payload.address || '').trim();
@@ -762,8 +794,8 @@ export class CheckoutService extends BaseService {
     const pincode = String(payload.pincode || '').trim();
 
     if (name.length < 2) this.throwBadRequest('Name is required');
-    if (phone.replace(/\D/g, '').length < 10) {
-      this.throwBadRequest('Valid phone is required');
+    if (phone.length < 10) {
+      this.throwBadRequest('Valid 10-digit mobile phone number is required');
     }
     if (businessName.length < 2) this.throwBadRequest('Business name is required');
     if (address.length < 5) this.throwBadRequest('Address is required');

@@ -1,5 +1,18 @@
-# ---------- API Container (Lightweight, No Chromium) ----------
+# ---------- Express HTTP API Container (with Chromium for PDF rendering) ----------
 FROM node:20-alpine AS base
+
+# Install Chromium and system dependencies required for Puppeteer on Alpine
+RUN apk add --no-cache \
+      chromium \
+      nss \
+      freetype \
+      harfbuzz \
+      ca-certificates \
+      ttf-freefont
+
+# Consistent Puppeteer executable path for Alpine Linux
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 WORKDIR /app
 

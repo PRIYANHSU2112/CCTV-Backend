@@ -3,6 +3,7 @@ import { ConflictError } from '../../shared/errors/conflict.error.js';
 import { SystemConstants } from '../../shared/constants/system.constant.js';
 import { SubscriptionStatus, PlanStatus } from '../../shared/constants/enum.constant.js';
 import { InvoiceModel, InvoiceType, getNextSequenceValue } from '../invoice/invoice.model.js';
+import { getFullPdfUrl } from '../../config/env.config.js';
 
 export class SubscriptionService extends BaseService {
   constructor({ subscriptionRepository, redisService }) {
@@ -213,6 +214,7 @@ export class SubscriptionService extends BaseService {
         items: [
           {
             description: `${packageTier} CCTV Subscription Renewal (${duration} Month${duration > 1 ? 's' : ''})`,
+            hsnSac: '998529',
             quantity: 1,
             unitPrice: subtotal,
             amount: subtotal
@@ -224,6 +226,8 @@ export class SubscriptionService extends BaseService {
         status: 'UNPAID',
         issueDate: new Date(),
         dueDate: baseDate,
+        pdfUrl: null,
+        pdfStatus: 'PENDING',
         notes: `Subscription renewed for ${duration} month(s)`
       });
     } catch {

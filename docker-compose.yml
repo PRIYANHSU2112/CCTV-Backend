@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # 1. Main Express HTTP API Service (Lightweight, No Chromium)
+  # 1. Main Express HTTP API Service
   api:
     build:
       context: .
@@ -21,13 +21,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_URL=redis://redis:6379
       - CORS_ORIGIN=*
-    mem_limit: 300m
+    mem_limit: 500m
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
 
-  # 2. Dedicated Production Background Worker Container (Chromium + BullMQ + PDF Generation)
+  # 2. Dedicated Production Background Worker Container (Chromium + BullMQ + Cloud PDF Generation)
   worker:
     build:
       context: .

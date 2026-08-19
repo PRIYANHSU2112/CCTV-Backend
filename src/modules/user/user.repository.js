@@ -8,7 +8,18 @@ export class UserRepository extends BaseRepository {
   }
 
   async findByPhone(phone, includePassword = false, options = {}) {
-    const query = this.model.findOne({ phone: phone.trim() });
+    if (!phone) return null;
+    const cleanDigits = String(phone).replace(/\D/g, '');
+    const plain10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
+    const variations = Array.from(new Set([
+      plain10,
+      `+91${plain10}`,
+      `91${plain10}`,
+      `0${plain10}`,
+      String(phone).trim(),
+    ].filter(Boolean)));
+
+    const query = this.model.findOne({ phone: { $in: variations } });
     if (includePassword) {
       query.select('+password');
     }

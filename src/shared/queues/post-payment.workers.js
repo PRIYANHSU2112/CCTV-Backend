@@ -1,9 +1,12 @@
 import { ADMIN_NOTIFICATION_QUEUE, INVOICE_PIPELINE_QUEUE } from './post-payment-queue.service.js';
 import { NotificationModel } from '../../modules/notification/notification.model.js';
-import { InvoiceModel, InvoiceStatus, PdfStatus, getNextSequenceValue } from '../../modules/invoice/invoice.model.js';
+import { InvoiceModel, InvoiceStatus, InvoiceType, PdfStatus, getNextSequenceValue } from '../../modules/invoice/invoice.model.js';
 import { PaymentTransactionModel } from '../../modules/payment/payment-transaction.model.js';
+import { ClientSubscriptionModel } from '../../modules/subscription/client-subscription.model.js';
+
 import { UserModel } from '../../modules/user/user.model.js';
-import { env } from '../../config/env.config.js';
+import { env, getFullPdfUrl } from '../../config/env.config.js';
+import { extractGstFromInclusive, roundMoney } from '../utils/money.util.js';
 import { logger } from '../utils/logger.js';
 
 let Worker = null;
@@ -14,32 +17,15 @@ try {
   logger.warn('⚠️ [BullMQ Worker] Module loading failed or missing in environment.');
 }
 
-/**
- * Placeholder: Send invoice via Email
- * Replace with Nodemailer / SendGrid / Resend integration
- */
-async function sendInvoiceEmail({ customerEmail, customerName, invoiceNumber, pdfUrl }) {
-  logger.info(`📧 [EMAIL STUB] Sending invoice ${invoiceNumber} to ${customerEmail || customerName} | PDF: ${pdfUrl || 'pending'}`);
-  // TODO: Integrate real email service
-  return { sent: true, channel: 'email' };
-}
+import { sendInvoiceEmail } from '../services/email.service.js';
 
-/**
- * Placeholder: Send invoice via WhatsApp
- * Replace with Twilio / WhatsApp Business API integration
- */
-async function sendInvoiceWhatsApp({ customerPhone, customerName, invoiceNumber, pdfUrl }) {
-  logger.info(`📱 [WHATSAPP STUB] Sending invoice ${invoiceNumber} to ${customerPhone || customerName} | PDF: ${pdfUrl || 'pending'}`);
-  // TODO: Integrate real WhatsApp API
-  return { sent: true, channel: 'whatsapp' };
-}
 
 /**
  * Post-Payment Background Workers
  *
  * Initializes two independent BullMQ workers:
  * 1. AdminNotificationWorker — creates in-app notification for admin users
- * 2. InvoicePipelineWorker — generates invoice → saves to DB → triggers PDF → sends email/WhatsApp
+ * 2. InvoicePipelineWorker — generates/updates invoice → triggers PDF → sends notification
  */
 export class PostPaymentWorkers {
   constructor({ redisClient, pdfQueueService = null }) {
@@ -92,9 +78,8 @@ export class PostPaymentWorkers {
     const { paymentId, amount, receiptNo, customerName, businessName, planName } = job.data;
     logger.info(`⚙️ Processing Admin Notification for Payment [${paymentId}]`);
 
-    // Find all admin/super-admin users to notify
     const admins = await UserModel.find({
-      role: { $in: ['SUPER_ADMIN', 'ACCOUNTS_MANAGER'] },
+      role: { $in: ['SUPER_ADMIN', 'ADMIN', 'ACCOUNTS_MANAGER'] },
       status: 'ACTIVE'
     }).select('_id').lean().exec();
 
@@ -124,71 +109,149 @@ export class PostPaymentWorkers {
   }
 
   /**
-   * Worker 2: Invoice Pipeline — Generate → Save → PDF → Email + WhatsApp
+   * Worker 2: Invoice Pipeline — Generate/Update Single Authoritative Invoice → PDF → Delivery
+   *
+   * Prevents duplicate invoice creation:
+   * - If a subscription exists, maintains EXACTLY 1 authoritative billing invoice.
+   * - Subsequent partial/balance payments update that existing invoice's amountPaid and amountDue.
    */
   async processInvoicePipeline(job) {
     const { paymentId, clientId, subscriptionId, amount, planName, sessionId, customer } = job.data;
     logger.info(`⚙️ Processing Invoice Pipeline for Payment [${paymentId}]`);
 
-    // ── Step 0: Idempotency check — skip if invoice already exists for this payment ──
-    const existingInvoice = await InvoiceModel.findOne({ paymentTransactionId: paymentId }).lean().exec();
-    if (existingInvoice) {
-      logger.info(`📋 Invoice already exists for payment [${paymentId}]: ${existingInvoice.invoiceNumber}. Skipping creation.`);
-      // Still attempt delivery if PDF is ready
-      if (existingInvoice.pdfStatus === 'COMPLETED' && existingInvoice.pdfUrl) {
-        await this.#deliverInvoice(existingInvoice, customer);
+    // ── Step 0: Check if invoice already linked to this exact payment ──
+    const existingForPayment = await InvoiceModel.findOne({ paymentTransactionId: paymentId }).exec();
+    if (existingForPayment) {
+      logger.info(`📋 Invoice already linked for payment [${paymentId}]: ${existingForPayment.invoiceNumber}.`);
+      if (this.pdfQueueService) {
+        await this.pdfQueueService.addPdfJob(existingForPayment._id.toString()).catch(() => { });
       }
-      return { idempotent: true, invoiceId: existingInvoice._id?.toString() };
+      return { idempotent: true, invoiceId: existingForPayment._id?.toString() };
     }
 
-    // ── Step 1: Generate atomic invoice number ──
+    const paymentAmount = roundMoney(Number(amount));
+    let targetInvoice = null;
+
+    // ── Step 1: Check if an existing invoice already exists for this subscription ──
+    if (subscriptionId) {
+      targetInvoice = await InvoiceModel.findOne({ subscriptionId }).sort({ createdAt: 1 }).exec();
+    }
+
+    if (targetInvoice) {
+      // ── PATH A: Update existing subscription invoice (No duplicate invoice created) ──
+      const currentPaid = roundMoney(Number(targetInvoice.amountPaid || 0));
+      const newPaid = roundMoney(currentPaid + paymentAmount);
+      const newDue = roundMoney(Math.max(0, targetInvoice.totalAmount - newPaid));
+      const isPaid = newDue <= 0;
+
+      targetInvoice.amountPaid = newPaid;
+      targetInvoice.amountDue = newDue;
+      targetInvoice.status = isPaid ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
+      if (isPaid) {
+        targetInvoice.paidAt = new Date();
+      }
+      targetInvoice.pdfStatus = PdfStatus.PENDING;
+      await targetInvoice.save();
+
+      logger.info({
+        msg: 'Existing invoice updated with payment',
+        invoiceNumber: targetInvoice.invoiceNumber,
+        newPaid,
+        newDue,
+        status: targetInvoice.status,
+      });
+
+      // Link payment to existing invoice
+      try {
+        await PaymentTransactionModel.findByIdAndUpdate(paymentId, {
+          $set: { invoiceId: targetInvoice.invoiceNumber }
+        }).exec();
+      } catch (err) {
+        logger.warn(`Could not link invoice to payment [${paymentId}]: ${err.message}`);
+      }
+
+      // Re-enqueue PDF generation to update PDF with new payment balance
+      if (this.pdfQueueService) {
+        await this.pdfQueueService.addPdfJob(targetInvoice._id.toString()).catch(() => { });
+      }
+
+      const invoiceObj = targetInvoice.toJSON ? targetInvoice.toJSON() : targetInvoice;
+      await this.#deliverInvoice(invoiceObj, customer);
+
+      return { success: true, invoiceId: targetInvoice._id.toString(), invoiceNumber: targetInvoice.invoiceNumber };
+    }
+
+    // ── PATH B: Create new single authoritative invoice ──
+    let subDoc = null;
+    if (subscriptionId) {
+      subDoc = await ClientSubscriptionModel.findById(subscriptionId).populate('planId').lean().exec();
+    }
+
+    // Invoice total is the full subscription plan price (or payment amount if one-off)
+    const planTotal = subDoc && subDoc.totalPlanPrice > 0
+      ? roundMoney(subDoc.totalPlanPrice)
+      : paymentAmount;
+
+    const gst = extractGstFromInclusive(planTotal, 18, false);
+    const amountDue = roundMoney(Math.max(0, planTotal - paymentAmount));
+    const invoiceStatus = amountDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
+
     const seq = await getNextSequenceValue('invoiceNumber');
     const year = new Date().getFullYear();
     const invoiceNumber = `INV-${year}-${seq.toString().padStart(5, '0')}`;
 
-    // ── Step 2: Create invoice document ──
-    let pdfUrl = `/uploads/invoices/${invoiceNumber}.pdf`;
-    if (env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY) {
-      if (env.AWS_ENDPOINT && env.AWS_ENDPOINT.includes('digitaloceanspaces.com')) {
-        const cleanEndpoint = env.AWS_ENDPOINT.replace(/^https?:\/\//, '').replace(/\/$/, '');
-        pdfUrl = `https://${env.AWS_S3_BUCKET}.${cleanEndpoint}/invoices/${invoiceNumber}.pdf`;
-      } else {
-        pdfUrl = `https://${env.AWS_S3_BUCKET}.s3.${env.AWS_REGION}.amazonaws.com/invoices/${invoiceNumber}.pdf`;
-      }
-    }
+    const description = planName
+      ? `${planName} CCTV Security Subscription`
+      : (subDoc?.packageTier ? `${subDoc.packageTier} Security Subscription Service` : 'CCTV Security Subscription');
 
     const invoiceData = {
       invoiceNumber,
       clientId,
       subscriptionId: subscriptionId || undefined,
-      invoiceType: subscriptionId ? 'RENEWAL' : 'NEW_PLAN',
+      invoiceType: subscriptionId ? InvoiceType.RENEWAL : InvoiceType.NEW_PLAN,
       paymentTransactionId: paymentId,
       items: [
         {
-          description: planName ? `CCTV Subscription — ${planName}` : 'CCTV Subscription Payment',
+          description,
+          hsnSac: '998529',
           quantity: 1,
-          unitPrice: Number(amount),
-          amount: Number(amount)
+          unitPrice: gst.baseAmount,
+          amount: gst.baseAmount,
         }
       ],
       currency: 'INR',
-      subtotal: Number(amount),
+      subtotal: gst.baseAmount,
       taxPercentage: 18,
-      status: InvoiceStatus.PAID,
-      paidAt: new Date(),
+      taxAmount: gst.gstAmount,
+      cgstAmount: gst.cgstAmount,
+      sgstAmount: gst.sgstAmount,
+      igstAmount: 0,
+      totalAmount: gst.totalAmount,
+      amountPaid: paymentAmount,
+      amountDue,
+      status: invoiceStatus,
+      paidAt: amountDue <= 0 ? new Date() : null,
       issueDate: new Date(),
-      dueDate: new Date(), // Already paid
-      pdfUrl,
-      pdfStatus: PdfStatus.COMPLETED,
-      pdfGeneratedAt: new Date(),
+      dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      pdfUrl: null,
+      pdfStatus: PdfStatus.PENDING,
       notes: sessionId ? `Checkout Session: ${sessionId}` : ''
     };
 
     const invoice = await InvoiceModel.create(invoiceData);
     const invoiceId = invoice._id?.toString() || invoice.id;
-    logger.info(`📋 Invoice Created with PDF URL [${pdfUrl}]: [${invoiceNumber}] for payment [${paymentId}]`);
 
-    // ── Step 3: Link invoice back to payment transaction ──
+    logger.info({
+      msg: 'Single authoritative invoice created',
+      invoiceNumber,
+      paymentId,
+      totalAmount: gst.totalAmount,
+      amountPaid: paymentAmount,
+      amountDue,
+      status: invoiceStatus,
+    });
+
+    // Link invoice to payment transaction
     try {
       await PaymentTransactionModel.findByIdAndUpdate(paymentId, {
         $set: { invoiceId: invoiceNumber }
@@ -197,46 +260,38 @@ export class PostPaymentWorkers {
       logger.warn(`Could not link invoice to payment [${paymentId}]: ${err.message}`);
     }
 
-    // ── Step 4: Enqueue PDF generation via existing pdf-generation-queue ──
+    // Enqueue PDF generation
     if (this.pdfQueueService) {
       await this.pdfQueueService.addPdfJob(invoiceId);
-      logger.info(`📄 PDF Generation Job Enqueued for Invoice [${invoiceId}]`);
     }
 
-    // ── Step 5: Attempt delivery (email + WhatsApp) ──
-    // PDF may not be ready yet — delivery stubs log the intent
     const invoiceObj = invoice.toJSON ? invoice.toJSON() : invoice;
-    await this.#deliverInvoice(invoiceObj, customer);
+    await this.#deliverInvoice(invoiceObj, customer, clientId);
 
     return { success: true, invoiceId, invoiceNumber };
   }
 
   /**
-   * Deliver invoice via Email and WhatsApp (placeholder stubs)
+   * Deliver invoice via Email
    */
-  async #deliverInvoice(invoice, customer = {}) {
-    const deliveryPromises = [];
-
-    deliveryPromises.push(
-      sendInvoiceEmail({
-        customerEmail: customer?.email,
-        customerName: customer?.name || 'Customer',
-        invoiceNumber: invoice.invoiceNumber,
-        pdfUrl: invoice.pdfUrl || null
-      }).catch(err => logger.error(`Email delivery failed: ${err.message}`))
-    );
-
-    deliveryPromises.push(
-      sendInvoiceWhatsApp({
-        customerPhone: customer?.phone,
-        customerName: customer?.name || 'Customer',
-        invoiceNumber: invoice.invoiceNumber,
-        pdfUrl: invoice.pdfUrl || null
-      }).catch(err => logger.error(`WhatsApp delivery failed: ${err.message}`))
-    );
-
-    await Promise.allSettled(deliveryPromises);
-    logger.info(`📨 Invoice delivery dispatched for [${invoice.invoiceNumber}]`);
+  async #deliverInvoice(invoice, customer = {}, clientId = null) {
+    try {
+      let recipientEmail = customer?.email;
+      if (!recipientEmail && (clientId || invoice.clientId)) {
+        const clientDoc = await ClientModel.findById(clientId || invoice.clientId).lean().exec();
+        recipientEmail = clientDoc?.email;
+      }
+      if (recipientEmail) {
+        await sendInvoiceEmail({
+          to: recipientEmail,
+          client: customer,
+          invoice,
+          pdfUrl: invoice.pdfUrl || null,
+        });
+      }
+    } catch (err) {
+      logger.error(`Post-payment invoice email delivery failed: ${err.message}`);
+    }
   }
 
   async close() {

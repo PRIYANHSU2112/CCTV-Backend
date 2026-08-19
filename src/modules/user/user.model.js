@@ -25,6 +25,11 @@ const userSchema = new mongoose.Schema(
       unique: true,
       sparse: true,
       trim: true,
+      set: (v) => {
+        if (!v) return v;
+        const digits = String(v).replace(/\D/g, '');
+        return digits.length >= 10 ? digits.slice(-10) : digits;
+      },
       index: true
     },
     email: {

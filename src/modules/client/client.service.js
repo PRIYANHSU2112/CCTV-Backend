@@ -58,7 +58,8 @@ export class ClientService extends BaseService {
       renewalDate,
     } = clientData;
 
-    const safePhone = phone ? String(phone).trim() : '';
+    const cleanDigits = phone ? String(phone).replace(/\D/g, '') : '';
+    const safePhone = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
     const safeName = name ? String(name).trim() : 'Contact Person';
     const safeBusinessName = businessName ? String(businessName).trim() : 'Business Account';
     const safeGstin = normalizeGstin(gstin);
@@ -93,6 +94,9 @@ export class ClientService extends BaseService {
       if (existingClient) {
         throw new ConflictError(`Client account with phone number '${safePhone}' already exists`);
       }
+      if (email && !user.email) {
+        await this.userRepository.update(user._id, { email: String(email).trim().toLowerCase() }).catch(() => {});
+      }
     } else {
       const defaultPassword = password || 'Client@123';
       const hashedPassword = await this.hashService.hashPassword(defaultPassword);
@@ -107,8 +111,11 @@ export class ClientService extends BaseService {
       });
     }
 
+    const clientEmail = email ? String(email).trim().toLowerCase() : (user.email || undefined);
+
     const client = await this.clientRepository.create({
       userId: user._id,
+      email: clientEmail,
       businessName: safeBusinessName,
       gstin: safeGstin,
       installationAddress: {
@@ -332,7 +339,7 @@ export class ClientService extends BaseService {
       id: raw.id || raw._id?.toString(),
       name: user?.name || 'Contact Person',
       businessName: raw.businessName,
-      email: user?.email || 'N/A',
+      email: raw.email || user?.email || 'N/A',
       phone: user?.phone || 'N/A',
       city: raw.installationAddress?.city || 'N/A',
       address: raw.installationAddress?.address || 'N/A',
@@ -371,7 +378,7 @@ export class ClientService extends BaseService {
     if (existing.userId && (updateData.name || updateData.phone || updateData.email)) {
       const userUpdates = {};
       if (updateData.name) userUpdates.name = updateData.name;
-      if (updateData.email) userUpdates.email = updateData.email;
+      if (updateData.email) userUpdates.email = String(updateData.email).trim().toLowerCase();
       if (updateData.phone && updateData.phone !== existing.userId.phone) {
         const phoneTaken = await this.userRepository.findByPhone(updateData.phone);
         if (phoneTaken) {
@@ -384,6 +391,9 @@ export class ClientService extends BaseService {
 
     const clientUpdates = {};
     if (updateData.businessName) clientUpdates.businessName = updateData.businessName;
+    if (updateData.email !== undefined) {
+      clientUpdates.email = updateData.email ? String(updateData.email).trim().toLowerCase() : null;
+    }
     if (updateData.gstin !== undefined) {
       clientUpdates.gstin = normalizeGstin(updateData.gstin);
     }
@@ -645,21 +655,21 @@ export class ClientService extends BaseService {
 
     const totalPaidFromPayments = payments
       .filter((p) => p.status === 'PAID')
-      .reduce((sum, p) => sum + p.amount, 0);
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-    const totalPaidFromSubscriptions = subscriptions
-      .reduce((sum, s) => sum + Number(s.paidAmount || 0), 0);
+    const totalPaid = Math.round(Number(totalPaidFromPayments || activeSub?.paidAmount || 0) * 100) / 100;
 
-    const totalPaid = Math.max(totalPaidFromPayments, totalPaidFromSubscriptions);
-
-    const subRemainingTotal = subscriptions.reduce((sum, s) => sum + Number(s.remainingAmount || 0), 0);
     const invoiceOutstandingTotal = invoices
       .filter((inv) => ['UNPAID', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status))
-      .reduce((sum, inv) => sum + inv.balance, 0);
+      .reduce((sum, inv) => sum + Number(inv.balance || 0), 0);
+
+    const subRemaining = activeSub?.remainingAmount !== undefined && activeSub?.remainingAmount !== null
+      ? Number(activeSub.remainingAmount)
+      : invoiceOutstandingTotal;
 
     const outstanding = isFullyPaidActive
       ? 0
-      : Math.max(subRemainingTotal, invoiceOutstandingTotal);
+      : Math.round(Number(subRemaining) * 100) / 100;
 
     const paymentSuccessRate = payments.length
       ? Math.round((payments.filter((p) => p.status === 'PAID').length / payments.length) * 100)
