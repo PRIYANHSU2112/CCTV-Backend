@@ -101,12 +101,21 @@ export class PaymentService extends BaseService {
     let updatedSub = null;
     if (subscriptionId) {
       try {
-        const sub = await ClientSubscriptionModel.findById(subscriptionId);
+        let sub = null;
+        try {
+          sub = await ClientSubscriptionModel.findById(subscriptionId).populate('planId');
+        } catch {
+          // Safe Mongo model bypass in unit tests
+        }
+
         if (sub) {
+          const planGstRate = sub.planId?.gstPercentage !== undefined
+            ? Number(sub.planId.gstPercentage)
+            : (sub.gstPercentage !== undefined ? Number(sub.gstPercentage) : 0);
           const currentPaid = roundMoney(Number(sub.paidAmount || 0));
           const totalPlan = roundMoney(Number(
             sub.totalPlanPrice ||
-            (sub.monthlyCharge ? Math.round(sub.monthlyCharge * 1.18 * 100) / 100 : numericAmount)
+            (sub.monthlyCharge ? Math.round(sub.monthlyCharge * (sub.durationInMonths || 1) * (1 + planGstRate / 100) * 100) / 100 : numericAmount)
           ));
           const newPaid = roundMoney(currentPaid + numericAmount);
           const newRemaining = roundMoney(Math.max(0, totalPlan - newPaid));
@@ -126,6 +135,11 @@ export class PaymentService extends BaseService {
             }).catch(() => {});
           }
           updatedSub = sub.toJSON ? sub.toJSON() : sub;
+        } else if (this.subscriptionRepository) {
+          const updated = await this.subscriptionRepository.updateSubscription(subscriptionId, {
+            lastPaymentDate: paidAtDate,
+          }).catch(() => {});
+          if (updated) updatedSub = updated.toJSON ? updated.toJSON() : updated;
         }
       } catch (subErr) {
         logger.error({ msg: 'Failed to sync subscription payment balance', err: subErr.message });
@@ -135,8 +149,10 @@ export class PaymentService extends BaseService {
     // ──────────────────────────────────────────────────────────────────────
     // 2. Reactivate client if subscription is fully paid
     // ──────────────────────────────────────────────────────────────────────
-    const isFullyPaid = updatedSub ? (updatedSub.remainingAmount <= 0) : true;
-    if (isFullyPaid && (client.status === ClientStatus.DUE || client.status === ClientStatus.SUSPENDED || client.status === ClientStatus.OVERDUE)) {
+    const isFullyPaid = updatedSub
+      ? (updatedSub.remainingAmount !== undefined && updatedSub.remainingAmount !== null ? updatedSub.remainingAmount <= 0 : true)
+      : true;
+    if (isFullyPaid && (client.status === ClientStatus.DUE || client.status === 'Due' || client.status === ClientStatus.SUSPENDED || client.status === ClientStatus.OVERDUE)) {
       await this.clientRepository.updateStatus(clientId, ClientStatus.ACTIVE).catch(() => { });
     }
 
@@ -156,9 +172,22 @@ export class PaymentService extends BaseService {
     const paymentId = (payment._id || payment.id)?.toString();
 
     // ──────────────────────────────────────────────────────────────────────
-    // 4. Enqueue BullMQ Post-Payment Background Jobs (Async Worker Pipeline)
+    // 4. Synchronously Sync & Update Authoritative Invoice & PDF
     // ──────────────────────────────────────────────────────────────────────
-    let targetInvoice = null;
+    const targetInvoice = await this.#handleInlineInvoiceFallback({
+      clientId,
+      subscriptionId,
+      payment,
+      invoiceId,
+      numericAmount,
+      paidAtDate,
+      updatedSub,
+      client,
+      note,
+      payload,
+      receiptNo,
+      isFullyPaid
+    });
 
     if (this.postPaymentQueueService) {
       await this.postPaymentQueueService.addAdminNotificationJob({
@@ -171,44 +200,6 @@ export class PaymentService extends BaseService {
         planName: updatedSub?.packageTier || 'CCTV Subscription Plan',
       }).catch((err) => {
         logger.warn(`Could not enqueue admin notification job for payment [${paymentId}]: ${err.message}`);
-      });
-
-      await this.postPaymentQueueService.addInvoicePipelineJob({
-        paymentId,
-        clientId: String(clientId),
-        subscriptionId: subscriptionId ? String(subscriptionId) : null,
-        amount: numericAmount,
-        planName: updatedSub?.packageTier || 'CCTV Subscription Plan',
-        sessionId: receiptNo,
-        customer: {
-          name: clientObj.userId?.name || clientObj.name || 'Client',
-          phone: clientObj.userId?.phone || clientObj.phone || '',
-          email: clientObj.email || clientObj.userId?.email || '',
-          businessName: clientObj.businessName || 'Business Account',
-          address: clientObj.installationAddress?.address || '',
-          city: clientObj.installationAddress?.city || '',
-          pincode: clientObj.installationAddress?.pincode || '',
-          state: clientObj.installationAddress?.state || 'Madhya Pradesh',
-          gstin: clientObj.gstin || '',
-        },
-      }).catch((err) => {
-        logger.warn(`Could not enqueue invoice pipeline job for payment [${paymentId}]: ${err.message}`);
-      });
-    } else {
-      // Fallback for environments without BullMQ queue (e.g. Unit tests / local fallback)
-      targetInvoice = await this.#handleInlineInvoiceFallback({
-        clientId,
-        subscriptionId,
-        payment,
-        invoiceId,
-        numericAmount,
-        paidAtDate,
-        updatedSub,
-        client,
-        note,
-        payload,
-        receiptNo,
-        isFullyPaid
       });
     }
 
@@ -260,14 +251,23 @@ export class PaymentService extends BaseService {
       }
 
       if (!targetInvoice && subscriptionId) {
-        targetInvoice = await InvoiceModel.findOne({ subscriptionId }).sort({ createdAt: 1 });
+        targetInvoice = await InvoiceModel.findOne({ subscriptionId }).sort({ createdAt: -1 });
       }
+
+      if (!targetInvoice && clientId) {
+        targetInvoice = await InvoiceModel.findOne({ clientId }).sort({ createdAt: -1 });
+      }
+
+      const planGstRate = updatedSub?.planId?.gstPercentage !== undefined
+        ? Number(updatedSub.planId.gstPercentage)
+        : (updatedSub?.gstPercentage !== undefined ? Number(updatedSub.gstPercentage) : 0);
 
       if (targetInvoice) {
         const hasSub = updatedSub && updatedSub.totalPlanPrice > 0;
         if (hasSub && targetInvoice.totalAmount < updatedSub.totalPlanPrice) {
-          const gst = extractGstFromInclusive(updatedSub.totalPlanPrice, 18, false);
+          const gst = extractGstFromInclusive(updatedSub.totalPlanPrice, planGstRate, false);
           targetInvoice.subtotal = gst.baseAmount;
+          targetInvoice.taxPercentage = planGstRate;
           targetInvoice.taxAmount = gst.gstAmount;
           targetInvoice.cgstAmount = gst.cgstAmount;
           targetInvoice.sgstAmount = gst.sgstAmount;
@@ -305,7 +305,7 @@ export class PaymentService extends BaseService {
         const planTotal = hasSub ? roundMoney(updatedSub.totalPlanPrice) : numericAmount;
         const totalPaidOnSub = hasSub ? roundMoney(updatedSub.paidAmount || numericAmount) : numericAmount;
 
-        const gst = extractGstFromInclusive(planTotal, 18, false);
+        const gst = extractGstFromInclusive(planTotal, planGstRate, false);
         const amountDue = roundMoney(Math.max(0, planTotal - totalPaidOnSub));
         const invoiceStatus = amountDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
 
@@ -333,7 +333,7 @@ export class PaymentService extends BaseService {
           ],
           currency: 'INR',
           subtotal: gst.baseAmount,
-          taxPercentage: 18,
+          taxPercentage: planGstRate,
           taxAmount: gst.gstAmount,
           cgstAmount: gst.cgstAmount,
           sgstAmount: gst.sgstAmount,

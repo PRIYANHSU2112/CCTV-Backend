@@ -155,8 +155,17 @@ export class ClientService extends BaseService {
         monthlyCharge: charge,
         cameras: cameraCount,
         packageName: clientData.packageName,
+        gstPercentage: clientData.gstPercentage !== undefined ? clientData.gstPercentage : clientData.taxPercentage,
       });
     }
+
+    const planGstRate = planDoc?.gstPercentage !== undefined
+      ? Number(planDoc.gstPercentage)
+      : (clientData.gstPercentage !== undefined ? Number(clientData.gstPercentage) : 0);
+
+    const totalPlanCharge = planDoc?.totalPrice !== undefined
+      ? Number(planDoc.totalPrice)
+      : Math.round(charge * months * (1 + planGstRate / 100) * 100) / 100;
 
     const subscription = await this.subscriptionRepository.createSubscription({
       clientId: user._id,
@@ -164,11 +173,16 @@ export class ClientService extends BaseService {
       packageTier,
       cameraCount,
       monthlyCharge: charge,
+      totalPlanPrice: totalPlanCharge,
+      gstPercentage: planGstRate,
+      paidAmount: 0,
+      remainingAmount: totalPlanCharge,
+      durationInMonths: months,
       contractStartDate: startDate,
       renewalDate: computedRenewal,
       autoRenewal: autoRenew !== undefined ? Boolean(autoRenew) : true,
       status: SubscriptionStatus.ACTIVE,
-      lastPaymentDate: new Date(),
+      lastPaymentDate: null,
     });
 
     const subId = subscription._id || subscription.id;
@@ -249,6 +263,7 @@ export class ClientService extends BaseService {
     monthlyCharge,
     cameras,
     packageName,
+    gstPercentage,
   }) {
     let plan = await this.subscriptionRepository.findPlanByTierAndCycle(
       packageTier,
@@ -266,6 +281,7 @@ export class ClientService extends BaseService {
     const codeSuffix = Date.now().toString(36).toUpperCase().slice(-6);
     const planCode = `${packageTier}_${billingCycle}_${codeSuffix}`.slice(0, 30);
     const name = `${packageName || packageTier} ${billingCycle.replace('_', ' ')}`.slice(0, 100);
+    const gstRate = gstPercentage !== undefined ? Number(gstPercentage) : 0;
 
     return this.subscriptionRepository.createPlan({
       name: name.length >= 3 ? name : `${packageTier} Plan`,
@@ -274,7 +290,7 @@ export class ClientService extends BaseService {
       billingCycle,
       durationInMonths: months,
       basePrice: monthlyCharge,
-      gstPercentage: 18,
+      gstPercentage: gstRate,
       maxCameras: cameras,
       features: [`Up to ${cameras} cameras`, `${billingCycle} billing`],
       autoRenewalSupported: true,
@@ -319,13 +335,19 @@ export class ClientService extends BaseService {
         ? raw.currentSubscriptionId
         : null;
 
+    const planGstRate = sub?.planId?.gstPercentage !== undefined
+      ? Number(sub.planId.gstPercentage)
+      : (sub?.gstPercentage !== undefined ? Number(sub.gstPercentage) : 0);
+
     const totalPlanPrice =
-      sub?.totalPlanPrice ||
-      sub?.planId?.totalPrice ||
-      (sub?.monthlyCharge ? Math.round(sub.monthlyCharge * 1.18 * 100) / 100 : 0);
+      sub?.totalPlanPrice !== undefined && sub?.totalPlanPrice !== null
+        ? Number(sub.totalPlanPrice)
+        : (sub?.planId?.totalPrice !== undefined && sub?.planId?.totalPrice !== null
+            ? Number(sub.planId.totalPrice)
+            : (sub?.monthlyCharge ? Math.round(sub.monthlyCharge * (sub?.durationInMonths || 1) * (1 + planGstRate / 100) * 100) / 100 : 0));
     const paidAmount = sub?.paidAmount !== undefined && sub?.paidAmount !== null
       ? Number(sub.paidAmount)
-      : (sub?.monthlyCharge || 0);
+      : 0;
     const calculatedRemaining = totalPlanPrice > 0
       ? Math.max(0, Math.round((totalPlanPrice - paidAmount) * 100) / 100)
       : 0;
@@ -333,7 +355,7 @@ export class ClientService extends BaseService {
       sub?.remainingAmount !== undefined && sub?.remainingAmount !== null && sub?.remainingAmount > 0
         ? Number(sub.remainingAmount)
         : calculatedRemaining;
-    const isSubActivePaid = sub?.status === 'ACTIVE' && remainingAmount <= 0 && paidAmount >= totalPlanPrice;
+    const isSubActivePaid = sub?.status === 'ACTIVE' && remainingAmount <= 0 && paidAmount >= totalPlanPrice && totalPlanPrice > 0;
 
     return {
       id: raw.id || raw._id?.toString(),
@@ -515,10 +537,13 @@ export class ClientService extends BaseService {
     const subscriptions = rawSubscriptions.map((sub) => {
       const planDoc = sub.planId || {};
       const durationInMonths = sub.durationInMonths || planDoc.durationInMonths || 1;
-      const totalPlanPrice = sub.totalPlanPrice || planDoc.totalPrice || (sub.monthlyCharge ? Math.round(sub.monthlyCharge * 1.18 * 100) / 100 : 0);
+      const planGstRate = planDoc.gstPercentage !== undefined
+        ? Number(planDoc.gstPercentage)
+        : (sub.gstPercentage !== undefined ? Number(sub.gstPercentage) : 0);
+      const totalPlanPrice = sub.totalPlanPrice || planDoc.totalPrice || (sub.monthlyCharge ? Math.round(sub.monthlyCharge * durationInMonths * (1 + planGstRate / 100) * 100) / 100 : 0);
       const paidAmount = sub.paidAmount !== undefined && sub.paidAmount !== null
         ? Number(sub.paidAmount)
-        : (sub.monthlyCharge || totalPlanPrice);
+        : 0;
       const calculatedRemaining = totalPlanPrice > 0
         ? Math.max(0, Math.round((totalPlanPrice - paidAmount) * 100) / 100)
         : 0;
@@ -546,7 +571,7 @@ export class ClientService extends BaseService {
     });
 
     const activeSub = subscriptions.find((s) => s.status === 'ACTIVE' || s.status === 'Active') || subscriptions[0];
-    const isFullyPaidActive = activeSub && (activeSub.status === 'ACTIVE' || activeSub.status === 'Active') && activeSub.remainingAmount <= 0 && activeSub.paidAmount >= activeSub.totalPlanPrice;
+    const isFullyPaidActive = activeSub && (activeSub.status === 'ACTIVE' || activeSub.status === 'Active') && activeSub.remainingAmount <= 0 && activeSub.paidAmount >= activeSub.totalPlanPrice && activeSub.totalPlanPrice > 0;
 
     // Auto-sync client status in DB to 'Active' if subscription is active & fully paid
     if (isFullyPaidActive && (client.status === 'Due' || client.status === 'DUE' || client.status !== ClientStatus.ACTIVE)) {
@@ -657,7 +682,7 @@ export class ClientService extends BaseService {
       .filter((p) => p.status === 'PAID')
       .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-    const totalPaid = Math.round(Number(totalPaidFromPayments || activeSub?.paidAmount || 0) * 100) / 100;
+    const totalPaid = Math.round(Number(totalPaidFromPayments || (activeSub?.paidAmount ? activeSub.paidAmount : 0)) * 100) / 100;
 
     const invoiceOutstandingTotal = invoices
       .filter((inv) => ['UNPAID', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status))
@@ -677,7 +702,7 @@ export class ClientService extends BaseService {
 
     const paymentTimeline = payments.length
       ? payments.map((p) => ({ date: p.paidAt, amount: p.amount }))
-      : subscriptions.map((s) => ({ date: s.startDate, amount: s.paidAmount || s.totalPlanPrice }));
+      : [];
 
     const statusCounts = { Paid: 0, Partial: 0, Unpaid: 0, Overdue: 0, Cancelled: 0 };
     invoices.forEach((inv) => {

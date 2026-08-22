@@ -32,9 +32,13 @@ const clientSubscriptionSchema = new mongoose.Schema(
       type: Number,
       default: null
     },
+    gstPercentage: {
+      type: Number,
+      default: 0
+    },
     paidAmount: {
       type: Number,
-      default: null
+      default: 0
     },
     remainingAmount: {
       type: Number,

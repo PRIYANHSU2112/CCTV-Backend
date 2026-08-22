@@ -312,7 +312,7 @@ export class SubscriptionRepository extends BaseRepository {
               cameraCount: 1,
               monthlyCharge: { $ifNull: ['$monthlyCharge', 0] },
               totalPlanPrice: { $ifNull: ['$totalPlanPrice', '$plan.totalPrice', '$monthlyCharge'] },
-              paidAmount: { $ifNull: ['$paidAmount', '$monthlyCharge'] },
+              paidAmount: { $ifNull: ['$paidAmount', 0] },
               remainingAmount: { $ifNull: ['$remainingAmount', 0] },
               durationInMonths: { $ifNull: ['$durationInMonths', '$plan.durationInMonths', 1] },
               contractStartDate: 1,

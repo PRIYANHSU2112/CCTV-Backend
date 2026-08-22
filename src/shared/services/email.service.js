@@ -102,8 +102,8 @@ function generateInvoiceHtml({ clientName, invoice, downloadUrl, isReceipt = fal
       description: 'CCTV Security Subscription & Surveillance Service',
       hsnSac: '998529',
       quantity: 1,
-      unitPrice: invoice.subtotal || total / 1.18,
-      amount: invoice.subtotal || total / 1.18,
+      unitPrice: invoice.subtotal || total,
+      amount: invoice.subtotal || total,
     },
   ];
 
@@ -248,16 +248,17 @@ function generateInvoiceHtml({ clientName, invoice, downloadUrl, isReceipt = fal
                     <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8fafc; border-radius: 10px; padding: 14px; border: 1px solid #e2e8f0;">
                       <tr>
                         <td style="padding: 4px 0; font-size: 13px; color: #64748b;">Taxable Amount:</td>
-                        <td style="padding: 4px 0; font-size: 13px; color: #1e293b; font-weight: 600; text-align: right;">${formatRupees(invoice.subtotal || total / 1.18)}</td>
+                        <td style="padding: 4px 0; font-size: 13px; color: #1e293b; font-weight: 600; text-align: right;">${formatRupees(invoice.subtotal ?? total)}</td>
+                      </tr>
+                      ${(invoice.taxAmount > 0 || invoice.taxPercentage > 0) ? `
+                      <tr>
+                        <td style="padding: 4px 0; font-size: 13px; color: #64748b;">CGST (${((invoice.taxPercentage || 0) / 2).toFixed(1)}%):</td>
+                        <td style="padding: 4px 0; font-size: 13px; color: #1e293b; font-weight: 600; text-align: right;">${formatRupees(invoice.cgstAmount || 0)}</td>
                       </tr>
                       <tr>
-                        <td style="padding: 4px 0; font-size: 13px; color: #64748b;">CGST (9%):</td>
-                        <td style="padding: 4px 0; font-size: 13px; color: #1e293b; font-weight: 600; text-align: right;">${formatRupees(invoice.cgstAmount || (total * 0.18) / 2.36)}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 4px 0; font-size: 13px; color: #64748b;">SGST (9%):</td>
-                        <td style="padding: 4px 0; font-size: 13px; color: #1e293b; font-weight: 600; text-align: right;">${formatRupees(invoice.sgstAmount || (total * 0.18) / 2.36)}</td>
-                      </tr>
+                        <td style="padding: 4px 0; font-size: 13px; color: #64748b;">SGST (${((invoice.taxPercentage || 0) / 2).toFixed(1)}%):</td>
+                        <td style="padding: 4px 0; font-size: 13px; color: #1e293b; font-weight: 600; text-align: right;">${formatRupees(invoice.sgstAmount || 0)}</td>
+                      </tr>` : ''}
                       <tr style="border-top: 1px solid #cbd5e1;">
                         <td style="padding: 8px 0 4px 0; font-size: 15px; color: #0f172a; font-weight: 700;">Total Amount:</td>
                         <td style="padding: 8px 0 4px 0; font-size: 16px; color: #0f172a; font-weight: 800; text-align: right;">${formatRupees(total)}</td>

@@ -167,7 +167,10 @@ export class InvoiceService {
 
     // Use authoritative calculation engine for GST
     const subtotal = roundMoney(items.reduce((sum, item) => sum + ((item.quantity || 1) * (item.unitPrice || 0)), 0));
-    const taxRate = payload.taxPercentage ?? 18;
+    const defaultTaxRate = sub?.planId?.gstPercentage !== undefined
+      ? Number(sub.planId.gstPercentage)
+      : (sub?.gstPercentage !== undefined ? Number(sub.gstPercentage) : (payload.taxPercentage !== undefined ? Number(payload.taxPercentage) : 18));
+    const taxRate = payload.taxPercentage !== undefined ? Number(payload.taxPercentage) : defaultTaxRate;
     const gst = calculateGstFromExclusive(subtotal, taxRate, false);
 
     // Atomic invoice number generation to prevent race conditions under concurrency
@@ -309,15 +312,15 @@ export class InvoiceService {
   }
 
   /**
-   * Ensure invoice PDF exists in cloud storage, compiling and uploading on-demand if missing.
+   * Ensure invoice PDF exists in cloud storage, compiling and uploading on-demand if missing or forced.
    */
-  async ensureInvoicePdfFile(invoiceId) {
+  async ensureInvoicePdfFile(invoiceId, forceRegenerate = false) {
     const invoice = await this.invoiceRepository.findById(invoiceId);
     if (!invoice) {
       throw new NotFoundError('Invoice not found');
     }
 
-    if (invoice.pdfUrl && invoice.pdfStatus === PdfStatus.COMPLETED) {
+    if (!forceRegenerate && invoice.pdfUrl && invoice.pdfStatus === PdfStatus.COMPLETED) {
       return { pdfUrl: invoice.pdfUrl, invoiceNumber: invoice.invoiceNumber, invoice };
     }
 

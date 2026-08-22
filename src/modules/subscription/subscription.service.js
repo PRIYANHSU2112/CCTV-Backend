@@ -202,9 +202,11 @@ export class SubscriptionService extends BaseService {
       const seq = await getNextSequenceValue('invoiceNumber');
       const year = new Date().getFullYear();
       const invoiceNumber = `INV-${year}-${seq.toString().padStart(5, '0')}`;
-      const packageTier = subscription.packageTier || subscription.planId?.packageTier || 'BASIC';
-      const monthlyCharge = Number(subscription.monthlyCharge || subscription.planId?.basePrice || 1499);
-      const subtotal = monthlyCharge * duration;
+      const planGstRate = subscription.planId?.gstPercentage !== undefined
+        ? Number(subscription.planId.gstPercentage)
+        : (subscription.gstPercentage !== undefined ? Number(subscription.gstPercentage) : 0);
+
+      const gst = calculateGstFromExclusive(subtotal, planGstRate, false);
 
       await InvoiceModel.create({
         invoiceNumber,
@@ -221,8 +223,15 @@ export class SubscriptionService extends BaseService {
           }
         ],
         currency: 'INR',
-        subtotal,
-        taxPercentage: 18,
+        subtotal: gst.baseAmount,
+        taxPercentage: planGstRate,
+        taxAmount: gst.gstAmount,
+        cgstAmount: gst.cgstAmount,
+        sgstAmount: gst.sgstAmount,
+        igstAmount: gst.igstAmount,
+        totalAmount: gst.totalAmount,
+        amountPaid: 0,
+        amountDue: gst.totalAmount,
         status: 'UNPAID',
         issueDate: new Date(),
         dueDate: baseDate,

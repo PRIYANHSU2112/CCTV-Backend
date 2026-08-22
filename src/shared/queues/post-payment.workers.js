@@ -192,7 +192,11 @@ export class PostPaymentWorkers {
       ? roundMoney(subDoc.totalPlanPrice)
       : paymentAmount;
 
-    const gst = extractGstFromInclusive(planTotal, 18, false);
+    const planGstRate = subDoc?.planId?.gstPercentage !== undefined
+      ? Number(subDoc.planId.gstPercentage)
+      : (subDoc?.gstPercentage !== undefined ? Number(subDoc.gstPercentage) : 0);
+
+    const gst = extractGstFromInclusive(planTotal, planGstRate, false);
     const amountDue = roundMoney(Math.max(0, planTotal - paymentAmount));
     const invoiceStatus = amountDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
 
@@ -221,7 +225,7 @@ export class PostPaymentWorkers {
       ],
       currency: 'INR',
       subtotal: gst.baseAmount,
-      taxPercentage: 18,
+      taxPercentage: planGstRate,
       taxAmount: gst.gstAmount,
       cgstAmount: gst.cgstAmount,
       sgstAmount: gst.sgstAmount,

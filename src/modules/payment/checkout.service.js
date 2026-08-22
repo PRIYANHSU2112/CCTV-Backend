@@ -182,6 +182,7 @@ export class CheckoutService extends BaseService {
           cameraCount: plan.maxCameras,
           monthlyCharge,
           totalPlanPrice: fullPlanPrice,
+          gstPercentage: plan.gstPercentage !== undefined ? Number(plan.gstPercentage) : 0,
           paidAmount: amount,
           remainingAmount,
           durationInMonths: months,

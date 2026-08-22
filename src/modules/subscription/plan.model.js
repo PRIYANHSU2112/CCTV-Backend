@@ -101,10 +101,11 @@ const subscriptionPlanSchema = new mongoose.Schema(
   }
 );
 
-// Pre-validate hook to calculate total price inclusive of 18% GST and default activationMonths
+// Pre-validate hook to calculate total price inclusive of plan GST and default activationMonths
 subscriptionPlanSchema.pre('validate', function (next) {
-  if (this.basePrice !== undefined && this.gstPercentage !== undefined) {
-    const gstAmount = (this.basePrice * this.gstPercentage) / 100;
+  if (this.basePrice !== undefined) {
+    const gstRate = this.gstPercentage !== undefined ? Number(this.gstPercentage) : 0;
+    const gstAmount = (this.basePrice * gstRate) / 100;
     this.totalPrice = Math.round((this.basePrice + gstAmount) * 100) / 100;
   }
 

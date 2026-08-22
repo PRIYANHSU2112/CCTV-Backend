@@ -29,6 +29,7 @@ import { initRbacModule, RbacService } from './modules/rbac/index.js';
 import { initCompanyModule } from './modules/company/index.js';
 import { initNotificationModule } from './modules/notification/index.js';
 import { initDashboardModule } from './modules/dashboard/index.js';
+import { initSearchModule } from './modules/search/index.js';
 
 export const createApp = async () => {
   const app = express();
@@ -103,6 +104,8 @@ export const createApp = async () => {
 
   const dashboardModule = initDashboardModule({ redisService });
 
+  const searchModule = initSearchModule({ redisService });
+
   // 5. Automatically Discover & Auto-Load All Module Swagger Spec Files
   await loadModuleSwaggerDocs();
 
@@ -128,6 +131,7 @@ export const createApp = async () => {
   // 6. Mount Domain Module Routers
   app.use(`${env.API_PREFIX}`, healthModule.router);
   app.use(`${env.API_PREFIX}/dashboard`, dashboardModule.router);
+  app.use(`${env.API_PREFIX}/search`, searchModule.router);
   app.use(`${env.API_PREFIX}/users`, userModule.router);
   app.use(`${env.API_PREFIX}/rbac`, rbacModule.router);
   app.use(`${env.API_PREFIX}/company`, companyModule.router);
