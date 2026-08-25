@@ -11,7 +11,7 @@ export const env = {
   CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
 
   // Database Configuration
-  MONGODB_URI: process.env.MONGODB_URI || process.env.DATABASE_URI || 'mongodb+srv://sahujipriyanshu2112_db_user:Priyanshu123@cluster0.srclyqf.mongodb.net/cctv?retryWrites=true&w=majority',
+  MONGODB_URI: process.env.MONGODB_URI || process.env.DATABASE_URI || 'mongodb+srv://saburicctv998529_db_user:nZQw7hTTS0inYRDo@saburi.wd7ye8q.mongodb.net/?appName=saburi',
 
   // Redis Configuration
   REDIS_HOST: process.env.REDIS_HOST || '127.0.0.1',
@@ -38,8 +38,8 @@ export const env = {
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 
   // Razorpay (secret never exposed to clients)
-  RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID || 'rzp_test_SwGnzVleE55oE8',
-  RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET || 'wg33MCoTYvfPf28NHg5uK6Qi',
+  RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID || 'rzp_test_TTZ0BazsdQwM9C',
+  RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET || 'k3pRl9maJ4pJXl3GNUw6hh2Q',
   RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   CHECKOUT_SESSION_TTL_MINUTES: parseInt(process.env.CHECKOUT_SESSION_TTL_MINUTES || '30', 10),
   RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || (process.env.NODE_ENV === 'production' ? '1000' : '5000'), 10),
