@@ -2,7 +2,7 @@ import { ClientModel } from '../client/client.model.js';
 import { PaymentTransactionModel } from '../payment/payment-transaction.model.js';
 import { ClientSubscriptionModel } from '../subscription/client-subscription.model.js';
 import { BaseRepository } from '../../shared/bases/base.repository.js';
-import { ClientStatus } from '../../shared/constants/enum.constant.js';
+import { ClientStatus, SubscriptionStatus } from '../../shared/constants/enum.constant.js';
 
 export class DashboardRepository extends BaseRepository {
   constructor() {
@@ -22,6 +22,7 @@ export class DashboardRepository extends BaseRepository {
         totalClients,
         activeClients,
         suspendedClients,
+        approachClients,
         duePaymentsCount,
         monthlyRevenueResult,
         upcomingRenewalsCount
@@ -29,20 +30,54 @@ export class DashboardRepository extends BaseRepository {
         ClientModel.countDocuments().catch(() => 0),
         ClientModel.countDocuments({ status: ClientStatus.ACTIVE }).catch(() => 0),
         ClientModel.countDocuments({ status: ClientStatus.SUSPENDED }).catch(() => 0),
+        ClientModel.countDocuments({ status: ClientStatus.APPROACH_CLIENT }).catch(() => 0),
         ClientModel.countDocuments({ status: { $in: [ClientStatus.DUE, ClientStatus.OVERDUE] } }).catch(() => 0),
-        PaymentTransactionModel.aggregate([
+        ClientSubscriptionModel.aggregate([
           {
             $match: {
-              status: 'PAID',
-              paidAt: { $gte: startOfMonth }
-            }
+              status: SubscriptionStatus.ACTIVE,
+            },
+          },
+          {
+            $lookup: {
+              from: 'clients',
+              let: { subClientId: '$clientId' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $or: [
+                        { $eq: ['$_id', '$$subClientId'] },
+                        { $eq: ['$userId', '$$subClientId'] },
+                      ],
+                    },
+                  },
+                },
+              ],
+              as: 'clientDoc',
+            },
+          },
+          {
+            $match: {
+              $or: [
+                { 'clientDoc.status': ClientStatus.ACTIVE },
+                { clientDoc: { $size: 0 } },
+              ],
+            },
           },
           {
             $group: {
               _id: null,
-              totalRevenue: { $sum: '$amount' }
-            }
-          }
+              totalRevenue: {
+                $sum: {
+                  $ifNull: [
+                    '$monthlyCharge',
+                    { $divide: ['$totalPlanPrice', { $ifNull: ['$durationInMonths', 1] }] },
+                  ],
+                },
+              },
+            },
+          },
         ]).catch(() => []),
         ClientSubscriptionModel.countDocuments({
           endDate: { $gte: today, $lte: next7Days },
@@ -50,12 +85,13 @@ export class DashboardRepository extends BaseRepository {
         }).catch(() => 0)
       ]);
 
-      const monthlyRevenue = monthlyRevenueResult?.[0]?.totalRevenue || 0;
+      const monthlyRevenue = Math.round((monthlyRevenueResult?.[0]?.totalRevenue || 0) * 100) / 100;
 
       return {
         totalClients: totalClients || 0,
         activeClients: activeClients || 0,
         suspendedClients: suspendedClients || 0,
+        approachClients: approachClients || 0,
         duePayments: duePaymentsCount || 0,
         monthlyRevenue: monthlyRevenue || 0,
         upcomingRenewals: upcomingRenewalsCount || 0
@@ -66,6 +102,7 @@ export class DashboardRepository extends BaseRepository {
         totalClients: 0,
         activeClients: 0,
         suspendedClients: 0,
+        approachClients: 0,
         duePayments: 0,
         monthlyRevenue: 0,
         upcomingRenewals: 0

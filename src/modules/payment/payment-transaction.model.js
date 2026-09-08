@@ -39,6 +39,19 @@ const paymentTransactionSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    installationCharge: {
+      type: Number,
+      default: 0,
+    },
+    installationHsnSac: {
+      type: String,
+      trim: true,
+      default: '995469',
+    },
+    installationGst: {
+      type: Number,
+      default: 0,
+    },
     amountPaise: {
       type: Number,
       min: 1,

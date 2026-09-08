@@ -40,7 +40,7 @@ export class PaymentController extends BaseController {
   });
 
   getGatewayConfig = this.catchAsync(async (req, res) => {
-    const config = this.checkoutService.getGatewayConfig();
+    const config = await this.checkoutService.getGatewayConfig();
     return this.sendResponse(res, config, Messages.FETCHED);
   });
 

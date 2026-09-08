@@ -18,6 +18,7 @@ import { roundMoney, toPaise, toRupees } from '../../shared/utils/money.util.js'
 import { CheckoutSessionModel } from './checkout-session.model.js';
 import { NotificationModel } from '../notification/notification.model.js';
 import { UserModel } from '../user/user.model.js';
+import { CompanyModel } from '../company/company.model.js';
 
 export class CheckoutService extends BaseService {
   constructor({
@@ -41,8 +42,20 @@ export class CheckoutService extends BaseService {
     this.postPaymentQueueService = postPaymentQueueService;
   }
 
-  getGatewayConfig() {
-    return this.razorpayService.getPublicConfig();
+  async getGatewayConfig() {
+    const config = this.razorpayService.getPublicConfig();
+    try {
+      const companyDoc = await CompanyModel.findOne().lean().exec();
+      config.installation = {
+        charge: companyDoc?.installationCharge !== undefined ? companyDoc.installationCharge : (companyDoc?.financialDefaults?.installationCharge ?? 6000),
+        hsnSac: companyDoc?.installationHsnSac || companyDoc?.financialDefaults?.installationHsnSac || '995469',
+        gstEnabled: companyDoc?.installationGstEnabled !== undefined ? companyDoc.installationGstEnabled : (companyDoc?.financialDefaults?.installationGstEnabled ?? true),
+        gstRate: companyDoc?.installationGstRate !== undefined ? companyDoc.installationGstRate : (companyDoc?.financialDefaults?.installationGstRate ?? 18),
+      };
+    } catch {
+      config.installation = { charge: 6000, hsnSac: '995469', gstEnabled: true, gstRate: 18 };
+    }
+    return config;
   }
 
   /**
@@ -76,13 +89,38 @@ export class CheckoutService extends BaseService {
       }
     }
 
+    // Fetch installation charge configuration from company settings
+    const companyDoc = await CompanyModel.findOne().lean().exec();
+    const installBase = Number(
+      companyDoc?.installationCharge !== undefined
+        ? companyDoc.installationCharge
+        : (companyDoc?.financialDefaults?.installationCharge ?? 6000)
+    );
+    const installHsnSac = String(
+      companyDoc?.installationHsnSac || companyDoc?.financialDefaults?.installationHsnSac || '995469'
+    );
+    const installGstEnabled =
+      companyDoc?.installationGstEnabled !== undefined
+        ? Boolean(companyDoc.installationGstEnabled)
+        : (companyDoc?.financialDefaults?.installationGstEnabled !== undefined
+            ? Boolean(companyDoc.financialDefaults.installationGstEnabled)
+            : true);
+    const installGstRate = Number(
+      companyDoc?.installationGstRate !== undefined
+        ? companyDoc.installationGstRate
+        : (companyDoc?.financialDefaults?.installationGstRate ?? 18)
+    );
+    const installGst = installGstEnabled ? roundMoney(installBase * (installGstRate / 100)) : 0;
+    const totalInstallationCharge = roundMoney(installBase + installGst);
+
     const fullPlanPrice = roundMoney(Number(plan.totalPrice));
+    const fullOrderPrice = roundMoney(fullPlanPrice + totalInstallationCharge);
     const customAmountNum = payload.customAmount ? roundMoney(Number(payload.customAmount)) : 0;
-    const amount = customAmountNum > 0 ? customAmountNum : fullPlanPrice;
+    const amount = customAmountNum > 0 ? customAmountNum : fullOrderPrice;
     if (!(amount > 0)) {
       this.throwBadRequest('Plan price is invalid');
     }
-    const remainingAmount = roundMoney(Math.max(0, fullPlanPrice - amount));
+    const remainingAmount = roundMoney(Math.max(0, fullOrderPrice - amount));
     const amountPaise = toPaise(amount);
     const sessionId = randomUUID().replace(/-/g, '');
     const ttlMin = env.CHECKOUT_SESSION_TTL_MINUTES || 30;
@@ -93,7 +131,7 @@ export class CheckoutService extends BaseService {
       amountPaise,
       currency: 'INR',
       receipt: `chk_${sessionId.slice(0, 20)}`,
-      notes: { sessionId, planId: String(plan._id || plan.id) },
+      notes: { sessionId, planId: String(plan._id || plan.id), installationCharge: String(installBase) },
     });
 
     const receiptNo = await this.#generateReceiptNo();
@@ -153,7 +191,7 @@ export class CheckoutService extends BaseService {
               pincode: customer.pincode,
               state: customer.state,
             },
-            status: ClientStatus.DUE,
+            status: ClientStatus.APPROACH_CLIENT,
           },
           { session },
         );
@@ -181,10 +219,14 @@ export class CheckoutService extends BaseService {
           packageTier: plan.packageTier,
           cameraCount: plan.maxCameras,
           monthlyCharge,
-          totalPlanPrice: fullPlanPrice,
+          totalPlanPrice: fullOrderPrice,
+          installationCharge: installBase,
+          installationHsnSac: installHsnSac,
+          installationGst: installGst,
+          isNewSubscription: true,
           gstPercentage: plan.gstPercentage !== undefined ? Number(plan.gstPercentage) : 0,
-          paidAmount: amount,
-          remainingAmount,
+          paidAmount: 0,
+          remainingAmount: fullOrderPrice,
           durationInMonths: months,
           contractStartDate: startDate,
           renewalDate,
@@ -200,7 +242,10 @@ export class CheckoutService extends BaseService {
           subscriptionId: subscription._id || subscription.id,
           checkoutSessionId: sessionId,
           amount,
-          planTotalPrice: fullPlanPrice,
+          planTotalPrice: fullOrderPrice,
+          installationCharge: installBase,
+          installationHsnSac: installHsnSac,
+          installationGst: installGst,
           remainingAmount,
           amountPaise,
           currency: 'INR',
@@ -209,7 +254,7 @@ export class CheckoutService extends BaseService {
           paidAt: null,
           receiptNo,
           razorpayOrderId: order.id,
-          note: `Checkout for plan ${plan.name}`,
+          note: `Checkout for plan ${plan.name} + Setup`,
         },
         { session },
       );
@@ -231,7 +276,11 @@ export class CheckoutService extends BaseService {
             paymentTransactionId: payment._id || payment.id,
             customer,
             amount,
-            planTotalPrice: fullPlanPrice,
+            planTotalPrice: fullOrderPrice,
+            installationCharge: installBase,
+            installationHsnSac: installHsnSac,
+            installationGst: installGst,
+            isNewSubscription: true,
             remainingAmount,
             durationInMonths: months,
             amountPaise,
@@ -269,7 +318,13 @@ export class CheckoutService extends BaseService {
       orderId: order.id,
       amount,
       amountPaise,
-      planTotalPrice: fullPlanPrice,
+      planTotalPrice: fullOrderPrice,
+      planOnlyPrice: fullPlanPrice,
+      installationCharge: installBase,
+      installationHsnSac: installHsnSac,
+      installationGst: installGst,
+      installationGstEnabled: installGstEnabled,
+      installationTotal: totalInstallationCharge,
       remainingAmount,
       durationInMonths: months,
       currency: 'INR',
@@ -509,19 +564,25 @@ export class CheckoutService extends BaseService {
           { session },
         );
       } else {
+        const fullPrice = roundMoney(Number(checkout.planTotalPrice || checkout.amount || 0));
+        const paidAmount = roundMoney(Number(checkout.amount || 0));
+        const remAmount = roundMoney(Math.max(0, fullPrice - paidAmount));
         await this.subscriptionRepository.updateSubscription(
           subscriptionId,
           {
             status: SubscriptionStatus.ACTIVE,
+            paidAmount,
+            remainingAmount: remAmount,
             lastPaymentDate: paidAt,
           },
           { session },
         );
       }
 
+      const targetClientStatus = (isBalancePayment ? (newRemainingAmount > 0 ? ClientStatus.DUE : ClientStatus.ACTIVE) : (checkout.remainingAmount > 0 ? ClientStatus.DUE : ClientStatus.ACTIVE));
       await this.clientRepository.updateStatus(
         checkout.clientId.toString(),
-        ClientStatus.ACTIVE,
+        targetClientStatus,
         { session },
       );
 
@@ -537,6 +598,8 @@ export class CheckoutService extends BaseService {
       await this.redisService.del('payment:summary');
       await this.redisService.del('sub:summary');
       await this.redisService.del(`client:${activated.checkout.clientId}`);
+      await this.redisService.del('client:stats');
+      await this.redisService.del('dashboard:kpis');
     } catch {
       // Redis optional
     }
@@ -576,11 +639,24 @@ export class CheckoutService extends BaseService {
       // Only cancel the subscription if it is NOT a balance payment on an existing sub
       const isBalancePayment = !!checkout.existingSubscriptionId;
       if (!isBalancePayment) {
+        const fullPrice = roundMoney(Number(checkout.planTotalPrice || checkout.amount || 0));
         await this.subscriptionRepository.updateSubscription(
           checkout.subscriptionId.toString(),
-          { status: SubscriptionStatus.CANCELLED },
+          {
+            status: SubscriptionStatus.CANCELLED,
+            paidAmount: 0,
+            remainingAmount: fullPrice,
+          },
           { session },
         );
+
+        if (checkout.clientId) {
+          await this.clientRepository.updateStatus(
+            checkout.clientId.toString(),
+            ClientStatus.APPROACH_CLIENT,
+            { session },
+          ).catch(() => {});
+        }
       }
 
       checkout.status = CheckoutSessionStatus.FAILED;
@@ -592,6 +668,9 @@ export class CheckoutService extends BaseService {
     try {
       await this.redisService.del(`checkout:session:${sessionId}`);
       await this.redisService.del('payment:summary');
+      await this.redisService.del('client:stats');
+      await this.redisService.del('dashboard:kpis');
+      if (result?.clientId) await this.redisService.del(`client:${result.clientId}`);
     } catch {
       // optional
     }
@@ -678,10 +757,15 @@ export class CheckoutService extends BaseService {
           },
           { session },
         );
+        const fullPrice = roundMoney(Number(doc.planTotalPrice || doc.amount || 0));
+        const paid = roundMoney(Number(doc.amount || 0));
+        const rem = roundMoney(Math.max(0, fullPrice - paid));
         await this.subscriptionRepository.updateSubscription(
           doc.subscriptionId.toString(),
           {
             status: SubscriptionStatus.ACTIVE,
+            paidAmount: paid,
+            remainingAmount: rem,
             lastPaymentDate: paidAt,
           },
           { session },
@@ -848,11 +932,23 @@ export class CheckoutService extends BaseService {
         },
         { session },
       );
+      const fullPrice = roundMoney(Number(doc.planTotalPrice || doc.amount || 0));
       await this.subscriptionRepository.updateSubscription(
         doc.subscriptionId.toString(),
-        { status: SubscriptionStatus.CANCELLED },
+        {
+          status: SubscriptionStatus.CANCELLED,
+          paidAmount: 0,
+          remainingAmount: fullPrice,
+        },
         { session },
       );
+      if (doc.clientId) {
+        await this.clientRepository.updateStatus(
+          doc.clientId.toString(),
+          ClientStatus.APPROACH_CLIENT,
+          { session },
+        ).catch(() => {});
+      }
       doc.status = CheckoutSessionStatus.EXPIRED;
       doc.failureReason = 'Checkout session expired';
       await doc.save({ session });

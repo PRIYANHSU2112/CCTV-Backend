@@ -5,6 +5,7 @@ import { CounterModel, InvoiceModel } from '../../modules/invoice/invoice.model.
 import { UserModel } from '../../modules/user/user.model.js';
 import { NotificationModel } from '../../modules/notification/notification.model.js';
 import { ClientSubscriptionModel } from '../../modules/subscription/client-subscription.model.js';
+import { CompanyModel } from '../../modules/company/company.model.js';
 
 describe('PaymentService (Unit Tests)', () => {
   let paymentService;
@@ -14,6 +15,16 @@ describe('PaymentService (Unit Tests)', () => {
   let mockRedisService;
 
   beforeEach(() => {
+    jest.spyOn(CompanyModel, 'findOne').mockReturnValue({
+      lean: jest.fn().mockReturnValue({
+        exec: jest.fn().mockResolvedValue({
+          installationCharge: 6000,
+          installationHsnSac: '995469',
+          installationGstEnabled: true,
+          installationGstRate: 18,
+        })
+      })
+    });
     jest.spyOn(CounterModel, 'findByIdAndUpdate').mockReturnValue({
       exec: jest.fn().mockResolvedValue({ seq: 1 })
     });
@@ -133,6 +144,67 @@ describe('PaymentService (Unit Tests)', () => {
       expect(result.client.businessName).toBe('Sharma Electronics');
     });
 
+    it('should record payment with installation charge', async () => {
+      mockClientRepository.findById.mockResolvedValue({
+        id: '507f1f77bcf86cd799439011',
+        businessName: 'Sharma Electronics',
+        status: 'Due',
+        currentSubscriptionId: '507f1f77bcf86cd799439022',
+        userId: { name: 'Satya' },
+        toJSON: () => ({
+          id: '507f1f77bcf86cd799439011',
+          businessName: 'Sharma Electronics',
+          status: 'Due',
+          userId: { name: 'Satya' },
+        }),
+      });
+      mockPaymentRepository.findByReceiptNo.mockResolvedValue(null);
+      mockPaymentRepository.create.mockResolvedValue({
+        _id: '507f1f77bcf86cd799439033',
+        receiptNo: 'RCPT-20260808-1235',
+        amount: 8799,
+        method: 'UPI',
+        status: 'PAID',
+        installationCharge: 6000,
+        installationGst: 1080,
+        installationHsnSac: '995469',
+        toJSON: () => ({
+          id: '507f1f77bcf86cd799439033',
+          receiptNo: 'RCPT-20260808-1235',
+          amount: 8799,
+          method: 'UPI',
+          status: 'PAID',
+          installationCharge: 6000,
+          installationGst: 1080,
+          installationHsnSac: '995469',
+        }),
+      });
+      mockSubscriptionRepository.updateSubscription.mockResolvedValue({});
+      mockClientRepository.updateStatus.mockResolvedValue({});
+      mockRedisService.del.mockResolvedValue(true);
+
+      const result = await paymentService.recordPayment({
+        clientId: '507f1f77bcf86cd799439011',
+        amount: 8799,
+        method: 'UPI',
+        applyInstallationCharge: true,
+        installationCharge: 6000,
+        installationGst: 1080,
+        note: 'Onboarding + Installation',
+      });
+
+      expect(mockPaymentRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clientId: '507f1f77bcf86cd799439011',
+          amount: 8799,
+          installationCharge: 6000,
+          installationGst: 1080,
+          installationHsnSac: '995469',
+        }),
+      );
+      expect(result.payment.receiptNo).toBe('RCPT-20260808-1235');
+    });
+
     it('should throw NotFoundError when client does not exist', async () => {
       mockClientRepository.findById.mockResolvedValue(null);
 
@@ -234,8 +306,11 @@ describe('PaymentService (Unit Tests)', () => {
     it('should return summary from repository and cache it', async () => {
       mockRedisService.get.mockResolvedValue(null);
       mockPaymentRepository.getPaymentSummary.mockResolvedValue({
+        totalRevenue: 5000,
         totalAmount: 5000,
-        count: 2,
+        paidCount: 2,
+        totalCount: 2,
+        gatewayCount: 1,
         byStatus: { PAID: { count: 2, amount: 5000 } },
         byMethod: { UPI: { count: 2, amount: 5000 } },
       });
@@ -243,6 +318,9 @@ describe('PaymentService (Unit Tests)', () => {
 
       const result = await paymentService.getPaymentSummary();
       expect(result.totalAmount).toBe(5000);
+      expect(result.totalRevenue).toBe(5000);
+      expect(result.paidCount).toBe(2);
+      expect(result.gatewayCount).toBe(1);
       expect(mockRedisService.set).toHaveBeenCalled();
     });
   });

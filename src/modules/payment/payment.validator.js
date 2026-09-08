@@ -24,6 +24,10 @@ export const createPaymentSchema = Joi.object({
   transactionId: Joi.string().trim().max(100).optional().allow('', null),
   note: Joi.string().trim().max(500).optional().allow('', null),
   subscriptionId: objectId.optional().allow(null),
+  applyInstallationCharge: Joi.boolean().optional(),
+  installationCharge: Joi.number().min(0).optional().allow(null),
+  installationGst: Joi.number().min(0).optional().allow(null),
+  installationHsnSac: Joi.string().trim().optional().allow('', null),
 }).prefs({ convert: true });
 
 export const queryPaymentsSchema = Joi.object({

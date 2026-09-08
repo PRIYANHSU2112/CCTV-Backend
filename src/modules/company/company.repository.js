@@ -33,6 +33,19 @@ export class CompanyRepository extends BaseRepository {
           twitter: 'https://twitter.com/satyakabir',
           linkedin: 'https://linkedin.com/company/satyakabir'
         },
+        installationCharge: 6000,
+        installationHsnSac: '995469',
+        installationGstEnabled: true,
+        installationGstRate: 18,
+        financialDefaults: {
+          currency: 'INR',
+          timeZone: 'Asia/Kolkata',
+          invoicePrefix: 'INV',
+          installationCharge: 6000,
+          installationHsnSac: '995469',
+          installationGstEnabled: true,
+          installationGstRate: 18
+        },
         policies: {
           termsAndConditions: 'Default Terms and Conditions',
           privacyPolicy: 'Default Privacy Policy',
@@ -41,6 +54,15 @@ export class CompanyRepository extends BaseRepository {
         }
       });
     }
+
+    // Ensure fallback defaults if doc predates installation fields
+    if (company) {
+      if (company.installationCharge === undefined) company.installationCharge = 6000;
+      if (!company.installationHsnSac) company.installationHsnSac = '995469';
+      if (company.installationGstEnabled === undefined) company.installationGstEnabled = true;
+      if (company.installationGstRate === undefined) company.installationGstRate = 18;
+    }
+
     return company;
   }
 

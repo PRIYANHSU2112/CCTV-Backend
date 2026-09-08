@@ -196,8 +196,28 @@ export class PostPaymentWorkers {
       ? Number(subDoc.planId.gstPercentage)
       : (subDoc?.gstPercentage !== undefined ? Number(subDoc.gstPercentage) : 0);
 
-    const gst = extractGstFromInclusive(planTotal, planGstRate, false);
-    const amountDue = roundMoney(Math.max(0, planTotal - paymentAmount));
+    const hasInstallation = Boolean(subDoc?.installationCharge && subDoc.installationCharge > 0);
+    const installBase = hasInstallation ? roundMoney(Number(subDoc.installationCharge)) : 0;
+    const installGst = hasInstallation ? roundMoney(Number(subDoc.installationGst || 0)) : 0;
+    const installHsnSac = subDoc?.installationHsnSac || '995469';
+
+    // Separate plan portion from installation charge
+    const planGrossTotal = roundMoney(Math.max(0, planTotal - (installBase + installGst)));
+    const planGst = extractGstFromInclusive(planGrossTotal > 0 ? planGrossTotal : planTotal, planGstRate, false);
+
+    const subtotal = hasInstallation
+      ? roundMoney(planGst.baseAmount + installBase)
+      : planGst.baseAmount;
+
+    const totalTaxAmount = hasInstallation
+      ? roundMoney(planGst.gstAmount + installGst)
+      : planGst.gstAmount;
+
+    const cgstAmount = roundMoney(totalTaxAmount / 2);
+    const sgstAmount = roundMoney(totalTaxAmount - cgstAmount);
+    const calculatedTotal = roundMoney(subtotal + totalTaxAmount);
+
+    const amountDue = roundMoney(Math.max(0, calculatedTotal - paymentAmount));
     const invoiceStatus = amountDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
 
     const seq = await getNextSequenceValue('invoiceNumber');
@@ -208,29 +228,41 @@ export class PostPaymentWorkers {
       ? `${planName} CCTV Security Subscription`
       : (subDoc?.packageTier ? `${subDoc.packageTier} Security Subscription Service` : 'CCTV Security Subscription');
 
+    const items = [
+      {
+        description,
+        hsnSac: '998529',
+        quantity: 1,
+        unitPrice: planGst.baseAmount,
+        amount: planGst.baseAmount,
+      }
+    ];
+
+    if (hasInstallation) {
+      items.push({
+        description: 'CCTV System One-Time Installation & Setup Charge',
+        hsnSac: installHsnSac,
+        quantity: 1,
+        unitPrice: installBase,
+        amount: installBase,
+      });
+    }
+
     const invoiceData = {
       invoiceNumber,
       clientId,
       subscriptionId: subscriptionId || undefined,
-      invoiceType: subscriptionId ? InvoiceType.RENEWAL : InvoiceType.NEW_PLAN,
+      invoiceType: hasInstallation ? InvoiceType.NEW_PLAN : (subscriptionId ? InvoiceType.RENEWAL : InvoiceType.NEW_PLAN),
       paymentTransactionId: paymentId,
-      items: [
-        {
-          description,
-          hsnSac: '998529',
-          quantity: 1,
-          unitPrice: gst.baseAmount,
-          amount: gst.baseAmount,
-        }
-      ],
+      items,
       currency: 'INR',
-      subtotal: gst.baseAmount,
+      subtotal,
       taxPercentage: planGstRate,
-      taxAmount: gst.gstAmount,
-      cgstAmount: gst.cgstAmount,
-      sgstAmount: gst.sgstAmount,
+      taxAmount: totalTaxAmount,
+      cgstAmount,
+      sgstAmount,
       igstAmount: 0,
-      totalAmount: gst.totalAmount,
+      totalAmount: calculatedTotal,
       amountPaid: paymentAmount,
       amountDue,
       status: invoiceStatus,

@@ -2,12 +2,24 @@ import { jest } from '@jest/globals';
 import { CheckoutService } from '../../modules/payment/checkout.service.js';
 import { BadRequestError } from '../../shared/errors/bad-request.error.js';
 import { NotFoundError } from '../../shared/errors/not-found.error.js';
+import { CompanyModel } from '../../modules/company/company.model.js';
 
 describe('CheckoutService (Unit Tests)', () => {
   let checkoutService;
   let mockRazorpayService;
 
   beforeEach(() => {
+    jest.spyOn(CompanyModel, 'findOne').mockReturnValue({
+      lean: jest.fn().mockReturnValue({
+        exec: jest.fn().mockResolvedValue({
+          installationCharge: 6000,
+          installationHsnSac: '995469',
+          installationGstEnabled: true,
+          installationGstRate: 18,
+        })
+      })
+    });
+
     mockRazorpayService = {
       getPublicConfig: jest.fn(() => ({ keyId: 'rzp_test_xxx', currency: 'INR' })),
       createOrder: jest.fn(),
@@ -30,8 +42,8 @@ describe('CheckoutService (Unit Tests)', () => {
   });
 
   describe('getGatewayConfig', () => {
-    it('returns public key only', () => {
-      const cfg = checkoutService.getGatewayConfig();
+    it('returns public key only', async () => {
+      const cfg = await checkoutService.getGatewayConfig();
       expect(cfg.keyId).toBe('rzp_test_xxx');
       expect(cfg.currency).toBe('INR');
       expect(cfg.keySecret).toBeUndefined();

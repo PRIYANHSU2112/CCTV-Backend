@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 import { ClientService } from '../../modules/client/client.service.js';
 import { ConflictError } from '../../shared/errors/conflict.error.js';
 import { NotFoundError } from '../../shared/errors/not-found.error.js';
+import { CompanyModel } from '../../modules/company/company.model.js';
 
 describe('ClientService (Unit Tests)', () => {
   let clientService;
@@ -12,6 +13,16 @@ describe('ClientService (Unit Tests)', () => {
   let mockRedisService;
 
   beforeEach(() => {
+    jest.spyOn(CompanyModel, 'findOne').mockReturnValue({
+      lean: jest.fn().mockReturnValue({
+        exec: jest.fn().mockResolvedValue({
+          installationCharge: 6000,
+          installationHsnSac: '995469',
+          installationGstEnabled: true,
+          installationGstRate: 18,
+        })
+      })
+    });
     mockClientRepository = {
       findById: jest.fn(),
       findByUserId: jest.fn(),
@@ -293,6 +304,30 @@ describe('ClientService (Unit Tests)', () => {
       mockClientRepository.findById.mockResolvedValue(null);
 
       await expect(clientService.getClientById('non_existing')).rejects.toThrow(NotFoundError);
+    });
+  });
+
+  describe('updateClientStatus', () => {
+    it('should normalize status to Active and update client status', async () => {
+      mockClientRepository.updateStatus.mockResolvedValue({
+        id: 'cli_3',
+        _id: 'cli_3',
+        businessName: 'Approach Shop',
+        status: 'Active',
+        userId: { _id: 'u_3', name: 'Rohan', phone: '9876543210', email: 'rohan@test.com' },
+        toJSON: () => ({ id: 'cli_3', businessName: 'Approach Shop', status: 'Active' })
+      });
+      mockClientRepository.model = {
+        updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 })
+      };
+
+      const result = await clientService.updateClientStatus('cli_3', 'ACTIVE');
+
+      expect(mockClientRepository.updateStatus).toHaveBeenCalledWith('cli_3', 'Active');
+      expect(result.status).toBe('Active');
+      expect(mockRedisService.del).toHaveBeenCalledWith('client:cli_3');
+      expect(mockRedisService.del).toHaveBeenCalledWith('client:stats');
+      expect(mockRedisService.del).toHaveBeenCalledWith('dashboard:kpis');
     });
   });
 });

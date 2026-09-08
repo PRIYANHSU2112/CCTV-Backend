@@ -80,7 +80,7 @@ export class SubscriptionController extends BaseController {
   });
 
   getClientSubscriptionSummary = this.catchAsync(async (req, res) => {
-    const summary = await this.subscriptionService.getClientSubscriptionSummary();
+    const summary = await this.subscriptionService.getClientSubscriptionSummary(req.query.status);
     return this.sendResponse(res, summary, Messages.FETCHED);
   });
 

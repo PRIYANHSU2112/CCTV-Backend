@@ -7,7 +7,13 @@ import { updateCompanySchema } from './company.validator.js';
 export const createCompanyRouter = (companyController) => {
   const router = Router();
 
-  // Protect all company endpoints with JWT authentication
+  /**
+   * @route GET /api/v1/company/public
+   * @desc Public company details & installation settings for client portal checkout
+   */
+  router.get('/public', companyController.getPublicCompanyProfile);
+
+  // Protect internal company management endpoints with JWT authentication
   router.use(authenticateJwt);
 
   /**

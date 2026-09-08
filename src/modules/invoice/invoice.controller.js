@@ -36,26 +36,29 @@ export class InvoiceController extends BaseController {
       return this.sendNotFound(res, 'Invoice not found');
     }
 
+    // If PDF already exists in database, return/redirect directly
+    if (invoice.pdfUrl && invoice.pdfUrl.startsWith('http') && req.query.fresh !== 'true') {
+      return res.redirect(invoice.pdfUrl);
+    }
+
     let finalPdfUrl = invoice.pdfUrl;
 
-    // If PDF is pending or fresh query passed, compile on-demand
+    // Only compile on-demand if pdfUrl is missing or forced
     if (!finalPdfUrl || invoice.pdfStatus === 'PENDING' || req.query.fresh === 'true') {
-      const ensured = await this.invoiceService.ensureInvoicePdfFile(req.params.id, true);
+      const ensured = await this.invoiceService.ensureInvoicePdfFile(req.params.id, req.query.fresh === 'true');
       finalPdfUrl = ensured?.pdfUrl || finalPdfUrl;
     }
 
     if (finalPdfUrl && finalPdfUrl.startsWith('http')) {
-      // Append cache-busting timestamp so browser/CDN never shows an outdated PDF
-      const separator = finalPdfUrl.includes('?') ? '&' : '?';
-      const version = invoice.updatedAt ? new Date(invoice.updatedAt).getTime() : Date.now();
-      return res.redirect(`${finalPdfUrl}${separator}v=${version}`);
+      return res.redirect(finalPdfUrl);
     }
 
     return this.sendNotFound(res, 'Invoice PDF is still generating. Please try again shortly.');
   });
 
   emailInvoice = this.catchAsync(async (req, res) => {
-    const result = await this.invoiceService.emailInvoice(req.params.id);
+    const targetEmail = req.body?.targetEmail || req.body?.email || null;
+    const result = await this.invoiceService.emailInvoice(req.params.id, targetEmail);
     return this.sendResponse(res, result, result.message);
   });
 

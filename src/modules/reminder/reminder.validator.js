@@ -29,3 +29,12 @@ export const queryRemindersSchema = Joi.object({
   channel: Joi.string().trim().optional(),
   search: Joi.string().trim().optional().allow('')
 });
+
+export const quickSendReminderSchema = Joi.object({
+  recipientType: Joi.string().valid('SINGLE', 'ALL_CLIENTS', 'DUE_ONLY', 'OVERDUE_ONLY', 'RENEWING_SOON').default('SINGLE'),
+  clientId: Joi.string().hex().length(24).optional().allow(null, ''),
+  channels: Joi.array().items(Joi.string().valid('SMS', 'WhatsApp', 'Email', 'Push')).min(1).default(['WhatsApp']),
+  messageTemplate: Joi.string().trim().min(3).max(2000).required(),
+  title: Joi.string().trim().max(150).optional().allow(null, '')
+});
+

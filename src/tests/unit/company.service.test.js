@@ -82,10 +82,24 @@ describe('CompanyService (Unit Tests)', () => {
       expect(result.id).toBe('comp_123');
       expect(result.socialMedia.facebook).toBe('https://facebook.com/satyakabir');
     });
+    it('should serve from L1 in-memory cache on subsequent calls without querying Redis or repository', async () => {
+      mockRedisService.get.mockResolvedValue(null);
+      mockCompanyRepository.getCompanyProfile.mockResolvedValue(mockCompanyDoc);
+
+      const firstCall = await companyService.getCompany();
+      expect(firstCall.id).toBe('comp_123');
+      expect(mockCompanyRepository.getCompanyProfile).toHaveBeenCalledTimes(1);
+
+      // Second call within TTL should be served from L1 memory
+      const secondCall = await companyService.getCompany();
+      expect(secondCall._l1).toBe(true);
+      expect(mockCompanyRepository.getCompanyProfile).toHaveBeenCalledTimes(1);
+      expect(mockRedisService.get).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('updateCompany', () => {
-    it('should update company profile and invalidate Redis cache', async () => {
+    it('should update company profile and invalidate Redis and in-memory caches', async () => {
       mockCompanyRepository.getCompanyProfile.mockResolvedValue(mockCompanyDoc);
       
       const updateData = {

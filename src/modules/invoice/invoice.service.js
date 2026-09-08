@@ -231,8 +231,24 @@ export class InvoiceService {
       throw new NotFoundError('Invoice not found');
     }
 
-    const client = await this.clientRepository.findById(invoice.clientId?._id || invoice.clientId);
-    const recipientEmail = targetEmail || client?.email || client?.userId?.email;
+    let client = null;
+    const clientId = invoice.clientId?._id
+      ? String(invoice.clientId._id)
+      : (invoice.clientId ? String(invoice.clientId) : null);
+
+    if (clientId) {
+      client = await this.clientRepository.findById(clientId);
+    }
+    if (!client && invoice.clientId && typeof invoice.clientId === 'object') {
+      client = invoice.clientId;
+    }
+
+    const recipientEmail =
+      targetEmail ||
+      client?.email ||
+      client?.userId?.email ||
+      invoice.clientId?.email ||
+      invoice.clientId?.userId?.email;
 
     if (!recipientEmail) {
       throw new BadRequestError('Client does not have a registered email address');
@@ -240,15 +256,19 @@ export class InvoiceService {
 
     const emailResult = await sendInvoiceEmail({
       to: recipientEmail,
-      client,
+      client: client || invoice.clientId,
       invoice,
       pdfUrl: invoice.pdfUrl || null,
     });
 
+    if (emailResult && emailResult.success === false) {
+      throw new BadRequestError(emailResult.error || 'Failed to send invoice email');
+    }
+
     return {
-      success: emailResult.success !== false,
+      success: true,
       message: `Invoice ${invoice.invoiceNumber || invoiceId} emailed successfully to ${recipientEmail}`,
-      messageId: emailResult.messageId,
+      messageId: emailResult?.messageId,
     };
   }
 
@@ -343,18 +363,14 @@ export class InvoiceService {
       throw new NotFoundError('Invoice not found');
     }
 
-    if (!invoice.pdfUrl || invoice.pdfStatus !== 'COMPLETED') {
-      try {
-        const client = await this.clientRepository.findById(invoice.clientId?._id || invoice.clientId);
-        const result = await this.generateAndUploadPdf(invoice, client);
-        if (result?.pdfUrl) {
-          invoice.pdfUrl = result.pdfUrl;
-          invoice.pdfStatus = PdfStatus.COMPLETED;
-        }
-      } catch {
-        const folderPrefix = (env.BUCKET_FOLDER_PATH || 'CCTV/').replace(/^\/+/, '');
-        invoice.pdfUrl = invoice.pdfUrl || `https://${env.AWS_S3_BUCKET}.sgp1.digitaloceanspaces.com/${folderPrefix}invoices/${invoice.invoiceNumber}.pdf`;
-      }
+    // If pdfUrl already exists, do not re-generate synchronously
+    if (invoice.pdfUrl && invoice.pdfUrl.startsWith('http')) {
+      return invoice;
+    }
+
+    if (!invoice.pdfUrl) {
+      const folderPrefix = (env.BUCKET_FOLDER_PATH || 'CCTV/').replace(/^\/+/, '');
+      invoice.pdfUrl = `https://${env.AWS_S3_BUCKET}.sgp1.digitaloceanspaces.com/${folderPrefix}invoices/${invoice.invoiceNumber}.pdf`;
     }
 
     return invoice;

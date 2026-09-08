@@ -30,13 +30,33 @@ export class RazorpayService {
 
   async createOrder({ amountPaise, currency = 'INR', receipt, notes = {} }) {
     this.assertConfigured();
-    const order = await this.client.orders.create({
-      amount: amountPaise,
-      currency,
-      receipt: String(receipt).slice(0, 40),
-      notes,
-    });
-    return order;
+    try {
+      const order = await this.client.orders.create({
+        amount: amountPaise,
+        currency,
+        receipt: String(receipt).slice(0, 40),
+        notes,
+      });
+      return order;
+    } catch (err) {
+      const desc =
+        err?.error?.description ||
+        err?.error?.message ||
+        err?.message ||
+        'Payment gateway order creation failed';
+
+      // If Razorpay API rejects credentials (401 Authentication failed), wrap as a clear descriptive error
+      // so client does not mistake it for a user authentication / JWT session failure
+      if (
+        err?.statusCode === 401 ||
+        (err?.error?.code === 'BAD_REQUEST_ERROR' && /auth/i.test(desc))
+      ) {
+        throw new BadRequestError(
+          `Razorpay Gateway Authentication Failed: Invalid Key ID or Secret (${desc}). Please verify RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in server environment.`
+        );
+      }
+      throw new BadRequestError(`Payment gateway error: ${desc}`);
+    }
   }
 
   verifyPaymentSignature({ orderId, paymentId, signature }) {

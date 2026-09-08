@@ -25,6 +25,7 @@ import { initClientModule } from './modules/client/index.js';
 import { initPaymentModule } from './modules/payment/index.js';
 import { initInvoiceModule } from './modules/invoice/index.js';
 import { initReminderModule } from './modules/reminder/index.js';
+import { initReminderLifecycleCron } from './scheduler/scheduled-tasks.js';
 import { initRbacModule, RbacService } from './modules/rbac/index.js';
 import { initCompanyModule } from './modules/company/index.js';
 import { initNotificationModule } from './modules/notification/index.js';
@@ -68,7 +69,7 @@ export const createApp = async () => {
   const healthModule = initHealthModule({ redisService });
   const userModule = initUserModule({ redisService, hashService });
   const subscriptionModule = initSubscriptionModule({ redisService });
-  
+
   // Client Module uses root DI container
   const clientModuleContainer = userModule.container;
   clientModuleContainer.register({
@@ -94,6 +95,9 @@ export const createApp = async () => {
     redisClient,
     clientRepository: clientModuleContainer.resolve('clientRepository')
   });
+
+  // Initialize automated 09:00 AM IST reminder lifecycle cron
+  initReminderLifecycleCron(reminderModule.container.resolve('reminderService'));
 
   const rbacModule = initRbacModule();
   await RbacService.seedDefaultRoles();

@@ -44,9 +44,31 @@ export const updateCompanySchema = Joi.object({
     cancellationPolicy: Joi.string().allow('', null).optional()
   }).optional(),
 
+  tradeName: Joi.string().allow('', null).optional(),
+  tagline: Joi.string().allow('', null).optional(),
+  gstin: Joi.string().allow('', null).optional(),
+  pan: Joi.string().allow('', null).optional(),
+  city: Joi.string().allow('', null).optional(),
+  state: Joi.string().allow('', null).optional(),
+  pincode: Joi.string().allow('', null).optional(),
+  bankName: Joi.string().allow('', null).optional(),
+  bankAccount: Joi.string().allow('', null).optional(),
+  bankIfsc: Joi.string().allow('', null).optional(),
+  invoicePrefix: Joi.string().allow('', null).optional(),
+  logoDataUrl: Joi.string().allow('', null).optional(),
+
+  installationCharge: Joi.number().min(0).optional(),
+  installationHsnSac: Joi.string().allow('', null).optional(),
+  installationGstEnabled: Joi.boolean().optional(),
+  installationGstRate: Joi.number().min(0).max(100).optional(),
+
   financialDefaults: Joi.object({
     currency: Joi.string().allow('', null).optional(),
     timeZone: Joi.string().allow('', null).optional(),
-    invoicePrefix: Joi.string().allow('', null).optional()
+    invoicePrefix: Joi.string().allow('', null).optional(),
+    installationCharge: Joi.number().min(0).optional(),
+    installationHsnSac: Joi.string().allow('', null).optional(),
+    installationGstEnabled: Joi.boolean().optional(),
+    installationGstRate: Joi.number().min(0).max(100).optional()
   }).optional()
-});
+}).unknown(true);

@@ -10,8 +10,8 @@ let transporterInstance = null;
  */
 export function getEmailTransporter() {
   if (!transporterInstance) {
-    const user = env.SMTP_USER || 'sahujipriyanshu2112@gmail.com';
-    const pass = (env.SMTP_PASS || 'zyikhapzhduwxtsv').replace(/\s+/g, '');
+    const user = env.SMTP_USER || 'saburicctv998529@gmail.com';
+    const pass = (env.SMTP_PASS || 'yqfwadiitilgifwb').replace(/\s+/g, '');
 
     transporterInstance = nodemailer.createTransport({
       host: env.SMTP_HOST || 'smtp.gmail.com',
@@ -301,7 +301,7 @@ function generateInvoiceHtml({ clientName, invoice, downloadUrl, isReceipt = fal
               <div style="font-weight: 600; color: #cbd5e1; margin-bottom: 4px;">
                 CCTV Security Solutions Private Limited
               </div>
-              <div>Need assistance? Email us at <a href="mailto:sahujipriyanshu2112@gmail.com" style="color: #38bdf8; text-decoration: none;">sahujipriyanshu2112@gmail.com</a></div>
+              <div>Need assistance? Email us at <a href="mailto:${env.SMTP_USER || 'saburicctv998529@gmail.com'}" style="color: #38bdf8; text-decoration: none;">${env.SMTP_USER || 'saburicctv998529@gmail.com'}</a></div>
               <div style="margin-top: 12px; font-size: 11px; color: #64748b;">
                 © ${new Date().getFullYear()} CCTV Security Cloud. All rights reserved. Generated automatically.
               </div>
@@ -349,9 +349,10 @@ export async function sendInvoiceEmail({ to, client, invoice, pdfBuffer = null, 
 
   const transporter = getEmailTransporter();
   const mailOptions = {
-    from: env.EMAIL_FROM || 'CCTV Security Solutions <sahujipriyanshu2112@gmail.com>',
+    from: env.EMAIL_FROM || '"SABURI SECURITY AGENCY PRIVATE LIMITED" <saburicctv998529@gmail.com>',
+    replyTo: env.SMTP_USER || 'saburicctv998529@gmail.com',
     to: recipient,
-    subject: `Tax Invoice ${invNumber} — CCTV Security Solutions`,
+    subject: `Tax Invoice ${invNumber} — SABURI SECURITY AGENCY PRIVATE LIMITED`,
     html,
     attachments,
   };
@@ -409,7 +410,8 @@ export async function sendPaymentReceiptEmail({ to, client, payment, invoice, pd
 
   const transporter = getEmailTransporter();
   const mailOptions = {
-    from: env.EMAIL_FROM || 'CCTV Security Solutions <sahujipriyanshu2112@gmail.com>',
+    from: env.EMAIL_FROM || '"SABURI SECURITY AGENCY PRIVATE LIMITED" <saburicctv998529@gmail.com>',
+    replyTo: env.SMTP_USER || 'saburicctv998529@gmail.com',
     to: recipient,
     subject: `Payment Receipt: ${formatRupees(payment.amount)} received (${invNumber})`,
     html,
@@ -436,7 +438,8 @@ export async function sendCustomEmail({ to, subject, html, text, attachments = [
 
   const transporter = getEmailTransporter();
   const mailOptions = {
-    from: env.EMAIL_FROM || 'CCTV Security Solutions <sahujipriyanshu2112@gmail.com>',
+    from: env.EMAIL_FROM || '"SABURI SECURITY AGENCY PRIVATE LIMITED" <saburicctv998529@gmail.com>',
+    replyTo: env.SMTP_USER || 'saburicctv998529@gmail.com',
     to,
     subject,
     html,
@@ -446,5 +449,156 @@ export async function sendCustomEmail({ to, subject, html, text, attachments = [
 
   const info = await transporter.sendMail(mailOptions);
   logger.info(`📧 Custom email sent to ${to} [MessageId: ${info.messageId}]`);
+  return { success: true, messageId: info.messageId };
+}
+
+/**
+ * Send Subscription & Payment Reminder Email with HTML Template
+ */
+export async function sendReminderEmail({
+  to,
+  clientName = 'Valued Customer',
+  businessName = '',
+  subject = 'Payment Reminder: Subscription Due — Saburi Security',
+  message = '',
+  amountDue = null,
+  dueDate = null,
+  planName = null,
+  paymentLink = null,
+}) {
+  if (!to || !to.includes('@')) {
+    throw new Error(`Invalid recipient email address: "${to}"`);
+  }
+
+  const payUrl = paymentLink || process.env.PAYMENT_LINK_BASE || 'https://saburisecurity.com/pay';
+  const displayName = clientName || businessName || 'Valued Customer';
+  const formattedDueDate = dueDate ? formatDate(dueDate) : null;
+  const formattedAmount =
+    amountDue !== null && amountDue !== undefined && Number(amountDue) > 0
+      ? formatRupees(Number(amountDue))
+      : null;
+
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color: #f1f5f9; padding: 32px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" max-width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.01); border: 1px solid #e2e8f0;">
+          <tr>
+            <td style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 28px 32px; color: #ffffff;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="vertical-align: middle;">
+                    <table cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="vertical-align: middle; padding-right: 14px;">
+                          <img src="https://satyakabir-bucket.sgp1.digitaloceanspaces.com/CCTV/brand/saburi-logo.png" alt="Saburi Security Solutions" width="44" height="44" style="display: block; width: 44px; height: 44px; border-radius: 10px; object-fit: contain; background: #ffffff; padding: 3px;" />
+                        </td>
+                        <td style="vertical-align: middle;">
+                          <div style="font-size: 19px; font-weight: 800; letter-spacing: -0.5px; color: #ffffff; line-height: 22px;">
+                            SABURI <span style="color: #38bdf8;">SECURITY</span>
+                          </div>
+                          <div style="font-size: 11px; color: #94a3b8; margin-top: 3px; letter-spacing: 0.5px; text-transform: uppercase;">
+                            24/7 Smart Surveillance & Security Cloud
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                  <td align="right" style="vertical-align: middle;">
+                    <span style="display: inline-block; padding: 5px 12px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; text-transform: uppercase; letter-spacing: 0.5px;">
+                      Reminder Notice
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding: 28px 32px 20px 32px;">
+              <h1 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 700; color: #0f172a;">
+                Subscription Payment Reminder 🔔
+              </h1>
+              <p style="margin: 0 0 16px 0; font-size: 14px; line-height: 22px; color: #334155;">
+                Hello <strong>${displayName}</strong>,
+              </p>
+              <div style="font-size: 14px; line-height: 24px; color: #475569; background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 14px 16px; border-radius: 6px; margin-bottom: 20px;">
+                ${(message || 'This is a reminder regarding your CCTV service subscription.').replace(/\n/g, '<br>')}
+              </div>
+
+              ${(formattedAmount || formattedDueDate || planName) ? `
+              <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8fafc; border-radius: 12px; padding: 16px; border: 1px solid #e2e8f0; margin-bottom: 24px;">
+                ${planName ? `
+                <tr>
+                  <td style="padding: 6px 12px; font-size: 13px; color: #64748b;">Subscription Plan:</td>
+                  <td style="padding: 6px 12px; font-size: 14px; color: #0f172a; font-weight: 600; text-align: right;">${planName}</td>
+                </tr>` : ''}
+                ${formattedDueDate ? `
+                <tr>
+                  <td style="padding: 6px 12px; font-size: 13px; color: #64748b;">Due Date:</td>
+                  <td style="padding: 6px 12px; font-size: 14px; color: #1e293b; font-weight: 600; text-align: right;">${formattedDueDate}</td>
+                </tr>` : ''}
+                ${formattedAmount ? `
+                <tr style="border-top: 1px solid #e2e8f0;">
+                  <td style="padding: 10px 12px 4px 12px; font-size: 14px; color: #0f172a; font-weight: 700;">Amount Due:</td>
+                  <td style="padding: 10px 12px 4px 12px; font-size: 16px; color: #dc2626; font-weight: 800; text-align: right;">${formattedAmount}</td>
+                </tr>` : ''}
+              </table>` : ''}
+
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center" style="padding-bottom: 12px;">
+                    <a href="${payUrl}" target="_blank" style="display: inline-block; background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%); color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 700; padding: 12px 28px; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(2, 132, 199, 0.25); text-align: center;">
+                      💳 Settle Payment Online
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin: 16px 0 0 0; font-size: 12px; color: #94a3b8; text-align: center;">
+                If you have already made this payment, please disregard this notice.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background-color: #0f172a; padding: 20px 32px; color: #94a3b8; font-size: 12px; line-height: 18px; text-align: center; border-top: 1px solid #1e293b;">
+              <div style="font-weight: 600; color: #cbd5e1; margin-bottom: 4px;">
+                Saburi Security Solutions Private Limited
+              </div>
+              <div>Need assistance? Email us at <a href="mailto:${env.SMTP_USER || 'saburicctv998529@gmail.com'}" style="color: #38bdf8; text-decoration: none;">${env.SMTP_USER || 'saburicctv998529@gmail.com'}</a></div>
+              <div style="margin-top: 8px; font-size: 11px; color: #64748b;">
+                © ${new Date().getFullYear()} Saburi Security Cloud. All rights reserved.
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `;
+
+  const transporter = getEmailTransporter();
+  const mailOptions = {
+    from: env.EMAIL_FROM || '"SABURI SECURITY AGENCY PRIVATE LIMITED" <saburicctv998529@gmail.com>',
+    replyTo: env.SMTP_USER || 'saburicctv998529@gmail.com',
+    to,
+    subject,
+    text: message,
+    html,
+  };
+
+  const info = await transporter.sendMail(mailOptions);
+  logger.info(`📧 Reminder email sent successfully to ${to} [MessageId: ${info.messageId}]`);
   return { success: true, messageId: info.messageId };
 }

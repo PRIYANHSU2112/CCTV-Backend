@@ -38,8 +38,8 @@ export const env = {
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 
   // Razorpay (secret never exposed to clients)
-  RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID || 'rzp_test_TTZ0BazsdQwM9C',
-  RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET || 'k3pRl9maJ4pJXl3GNUw6hh2Q',
+  RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID || 'rzp_live_TZUkX5PwlE7KzI',
+  RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET || 'a8fY1FbquME6aKoybVs6YrhX',
   RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   CHECKOUT_SESSION_TTL_MINUTES: parseInt(process.env.CHECKOUT_SESSION_TTL_MINUTES || '30', 10),
   RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || (process.env.NODE_ENV === 'production' ? '1000' : '5000'), 10),
@@ -50,7 +50,15 @@ export const env = {
   isTest: process.env.NODE_ENV === 'test',
 
   // Application Public URL for full static / invoice links
-  APP_URL: process.env.APP_URL || process.env.API_BASE_URL || process.env.BACKEND_URL || `http://localhost:${process.env.PORT || '5000'}`
+  APP_URL: process.env.APP_URL || process.env.API_BASE_URL || process.env.BACKEND_URL || `http://localhost:${process.env.PORT || '5000'}`,
+
+  // SMTP / Nodemailer Email Configuration
+  SMTP_HOST: process.env.SMTP_HOST || 'smtp.gmail.com',
+  SMTP_PORT: parseInt(process.env.SMTP_PORT || '465', 10),
+  SMTP_SECURE: process.env.SMTP_SECURE !== 'false',
+  SMTP_USER: process.env.SMTP_USER || 'saburicctv998529@gmail.com',
+  SMTP_PASS: process.env.SMTP_PASS || 'yqfwadiitilgifwb',
+  EMAIL_FROM: process.env.EMAIL_FROM || '"SABURI SECURITY AGENCY PRIVATE LIMITED" <saburicctv998529@gmail.com>'
 };
 
 /**

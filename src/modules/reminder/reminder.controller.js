@@ -10,7 +10,7 @@ export class ReminderController extends BaseController {
   createReminder = this.catchAsync(async (req, res) => {
     const result = await this.reminderService.createReminder({
       ...req.body,
-      createdBy: req.user?.id
+      createdBy: req.user?.id,
     });
     return this.sendCreated(res, result, 'Reminder rule created & scheduled');
   });
@@ -53,5 +53,30 @@ export class ReminderController extends BaseController {
   updateReminderConfig = this.catchAsync(async (req, res) => {
     const config = await this.reminderService.updateReminderConfig(req.body);
     return this.sendResponse(res, config, 'Reminder schedule config updated');
+  });
+
+  sendQuickReminder = this.catchAsync(async (req, res) => {
+    const result = await this.reminderService.sendQuickReminder(req.body);
+    return this.sendCreated(res, result, result.message || 'Quick reminder dispatched to queue');
+  });
+
+  handleProviderWebhook = this.catchAsync(async (req, res) => {
+    const result = await this.reminderService.handleProviderWebhook(req.body);
+    return this.sendResponse(res, result, 'Provider delivery report processed');
+  });
+
+  retryReminder = this.catchAsync(async (req, res) => {
+    const result = await this.reminderService.retryFailedReminder(req.params.id);
+    return this.sendResponse(res, result, 'Reminder queued for retry');
+  });
+
+  getReminderStats = this.catchAsync(async (req, res) => {
+    const stats = await this.reminderService.getReminderStats();
+    return this.sendResponse(res, stats, Messages.FETCHED);
+  });
+
+  triggerDailyLifecycle = this.catchAsync(async (req, res) => {
+    const result = await this.reminderService.processDailyLifecycleReminders();
+    return this.sendResponse(res, result, 'Daily lifecycle evaluation completed');
   });
 }

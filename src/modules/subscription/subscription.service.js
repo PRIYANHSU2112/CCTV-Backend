@@ -346,8 +346,9 @@ export class SubscriptionService extends BaseService {
     return { items, page, limit, total };
   }
 
-  async getClientSubscriptionSummary() {
-    const cacheKey = 'sub:summary';
+  async getClientSubscriptionSummary(rawStatus = null) {
+    const status = this.#normalizeSubscriptionStatus(rawStatus);
+    const cacheKey = status ? `sub:summary:${status}` : 'sub:summary';
     try {
       const cached = await this.redisService.get(cacheKey);
       if (cached) return { ...cached, _cached: true };
@@ -355,7 +356,7 @@ export class SubscriptionService extends BaseService {
       // Redis optional
     }
 
-    const summary = await this.subscriptionRepository.getClientSubscriptionSummary();
+    const summary = await this.subscriptionRepository.getClientSubscriptionSummary(status);
     try {
       await this.redisService.set(cacheKey, summary, SystemConstants.CACHE_TTL.SHORT);
     } catch {

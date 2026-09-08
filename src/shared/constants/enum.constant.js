@@ -67,7 +67,8 @@ export const ClientStatus = Object.freeze({
   ACTIVE: 'Active',
   DUE: 'Due',
   OVERDUE: 'Overdue',
-  SUSPENDED: 'Suspended'
+  SUSPENDED: 'Suspended',
+  APPROACH_CLIENT: 'Approach Client'
 });
 
 export const CameraStatus = Object.freeze({

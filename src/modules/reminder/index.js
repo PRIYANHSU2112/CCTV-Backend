@@ -7,7 +7,7 @@ import { ReminderController } from './reminder.controller.js';
 import { createReminderRouter } from './reminder.routes.js';
 import { reminderSwaggerDocs } from './reminder.swagger.js';
 
-export const initReminderModule = ({ redisClient, clientRepository, isWorker = false }) => {
+export const initReminderModule = ({ redisClient, clientRepository, isWorker = true }) => {
   const moduleContainer = createContainer();
 
   moduleContainer.register({
@@ -22,11 +22,15 @@ export const initReminderModule = ({ redisClient, clientRepository, isWorker = f
     reminderController: asClass(ReminderController).scoped()
   });
 
-  if (isWorker) {
-    moduleContainer.register({
-      reminderWorker: asClass(ReminderWorker).singleton()
-    });
-    moduleContainer.resolve('reminderWorker');
+  if (isWorker && redisClient) {
+    try {
+      moduleContainer.register({
+        reminderWorker: asClass(ReminderWorker).singleton()
+      });
+      moduleContainer.resolve('reminderWorker');
+    } catch (err) {
+      // Safe fallback if redis connection isn't ready
+    }
   }
 
   const reminderController = moduleContainer.resolve('reminderController');

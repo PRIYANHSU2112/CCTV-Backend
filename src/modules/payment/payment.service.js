@@ -13,6 +13,7 @@ import { PdfService } from '../invoice/pdf.service.js';
 import { S3Service } from '../../shared/storage/s3.service.js';
 import { extractGstFromInclusive, roundMoney, toPaise } from '../../shared/utils/money.util.js';
 import { sendPaymentReceiptEmail } from '../../shared/services/email.service.js';
+import { CompanyModel } from '../company/company.model.js';
 import { logger } from '../../shared/utils/logger.js';
 
 
@@ -49,6 +50,10 @@ export class PaymentService extends BaseService {
       note,
       subscriptionId: bodySubId,
       recordedBy,
+      applyInstallationCharge,
+      installationCharge,
+      installationGst,
+      installationHsnSac,
     } = paymentData;
 
     const client = await this.clientRepository.findById(clientId);
@@ -75,6 +80,46 @@ export class PaymentService extends BaseService {
       this.throwBadRequest('Payment amount must be greater than 0');
     }
 
+    // Resolve installation charge
+    let installBase = 0;
+    let installGst = 0;
+    let installHsnSac = '995469';
+
+    const shouldApplyInstallation = applyInstallationCharge !== undefined
+      ? Boolean(applyInstallationCharge)
+      : (installationCharge !== undefined && Number(installationCharge) > 0);
+
+    if (shouldApplyInstallation) {
+      let companyDoc = null;
+      try {
+        companyDoc = await CompanyModel.findOne().lean().exec();
+      } catch {
+        // Safe fallback
+      }
+
+      installBase = installationCharge !== undefined && installationCharge !== null
+        ? roundMoney(Number(installationCharge))
+        : Number(companyDoc?.installationCharge !== undefined ? companyDoc.installationCharge : (companyDoc?.financialDefaults?.installationCharge ?? 6000));
+
+      installHsnSac = installationHsnSac || companyDoc?.installationHsnSac || companyDoc?.financialDefaults?.installationHsnSac || '995469';
+
+      const installGstEnabled = companyDoc?.installationGstEnabled !== undefined
+        ? Boolean(companyDoc.installationGstEnabled)
+        : (companyDoc?.financialDefaults?.installationGstEnabled !== undefined
+            ? Boolean(companyDoc.financialDefaults.installationGstEnabled)
+            : true);
+
+      const installGstRate = Number(
+        companyDoc?.installationGstRate !== undefined
+          ? companyDoc.installationGstRate
+          : (companyDoc?.financialDefaults?.installationGstRate ?? 18)
+      );
+
+      installGst = installationGst !== undefined && installationGst !== null
+        ? roundMoney(Number(installationGst))
+        : (installGstEnabled ? roundMoney(installBase * (installGstRate / 100)) : 0);
+    }
+
     const payload = {
       clientId,
       subscriptionId: subscriptionId || null,
@@ -87,6 +132,9 @@ export class PaymentService extends BaseService {
       paidAt: paidAtDate,
       receiptNo,
       note: note ? String(note).trim() : '',
+      installationCharge: installBase,
+      installationGst: installGst,
+      installationHsnSac: installHsnSac,
     };
 
     if (recordedBy && /^[a-fA-F0-9]{24}$/.test(String(recordedBy))) {
@@ -112,6 +160,16 @@ export class PaymentService extends BaseService {
           const planGstRate = sub.planId?.gstPercentage !== undefined
             ? Number(sub.planId.gstPercentage)
             : (sub.gstPercentage !== undefined ? Number(sub.gstPercentage) : 0);
+
+          // If installation charge is applied via payment and was not recorded on subscription yet, incorporate it
+          if (installBase > 0 && (!sub.installationCharge || sub.installationCharge <= 0)) {
+            sub.installationCharge = installBase;
+            sub.installationGst = installGst;
+            sub.installationHsnSac = installHsnSac;
+            const extraInstallation = roundMoney(installBase + installGst);
+            sub.totalPlanPrice = roundMoney((sub.totalPlanPrice || 0) + extraInstallation);
+          }
+
           const currentPaid = roundMoney(Number(sub.paidAmount || 0));
           const totalPlan = roundMoney(Number(
             sub.totalPlanPrice ||
@@ -131,7 +189,13 @@ export class PaymentService extends BaseService {
             await this.subscriptionRepository.updateSubscription(subscriptionId, {
               lastPaymentDate: paidAtDate,
               paidAmount: newPaid,
-              remainingAmount: newRemaining
+              remainingAmount: newRemaining,
+              ...(installBase > 0 ? {
+                installationCharge: sub.installationCharge,
+                installationGst: sub.installationGst,
+                installationHsnSac: sub.installationHsnSac,
+                totalPlanPrice: sub.totalPlanPrice,
+              } : {})
             }).catch(() => {});
           }
           updatedSub = sub.toJSON ? sub.toJSON() : sub;
@@ -262,25 +326,77 @@ export class PaymentService extends BaseService {
         ? Number(updatedSub.planId.gstPercentage)
         : (updatedSub?.gstPercentage !== undefined ? Number(updatedSub.gstPercentage) : 0);
 
-      if (targetInvoice) {
-        const hasSub = updatedSub && updatedSub.totalPlanPrice > 0;
-        if (hasSub && targetInvoice.totalAmount < updatedSub.totalPlanPrice) {
-          const gst = extractGstFromInclusive(updatedSub.totalPlanPrice, planGstRate, false);
-          targetInvoice.subtotal = gst.baseAmount;
-          targetInvoice.taxPercentage = planGstRate;
-          targetInvoice.taxAmount = gst.gstAmount;
-          targetInvoice.cgstAmount = gst.cgstAmount;
-          targetInvoice.sgstAmount = gst.sgstAmount;
-          targetInvoice.totalAmount = gst.totalAmount;
-          if (targetInvoice.items && targetInvoice.items.length > 0) {
-            targetInvoice.items[0].unitPrice = gst.baseAmount;
-            targetInvoice.items[0].amount = gst.baseAmount;
-          }
-        }
+      const hasInstallation = Boolean(
+        (payment?.installationCharge && payment.installationCharge > 0) ||
+        (updatedSub?.installationCharge && updatedSub.installationCharge > 0)
+      );
+      const installBase = hasInstallation
+        ? roundMoney(Number(payment?.installationCharge || updatedSub?.installationCharge || 0))
+        : 0;
+      const installGst = hasInstallation
+        ? roundMoney(Number(payment?.installationGst || updatedSub?.installationGst || 0))
+        : 0;
+      const installHsnSac = payment?.installationHsnSac || updatedSub?.installationHsnSac || '995469';
 
-        const totalPaidOnSub = hasSub && updatedSub.paidAmount !== undefined
-          ? roundMoney(Number(updatedSub.paidAmount))
-          : roundMoney(Number(targetInvoice.amountPaid || 0) + numericAmount);
+      const hasSub = updatedSub && updatedSub.totalPlanPrice > 0;
+      const fullTotal = hasSub ? roundMoney(updatedSub.totalPlanPrice) : numericAmount;
+
+      const planGrossTotal = hasInstallation
+        ? roundMoney(Math.max(0, fullTotal - (installBase + installGst)))
+        : fullTotal;
+
+      const planGst = extractGstFromInclusive(planGrossTotal > 0 ? planGrossTotal : fullTotal, planGstRate, false);
+
+      const subtotal = hasInstallation
+        ? roundMoney(planGst.baseAmount + installBase)
+        : planGst.baseAmount;
+
+      const totalTaxAmount = hasInstallation
+        ? roundMoney(planGst.gstAmount + installGst)
+        : planGst.gstAmount;
+
+      const cgstAmount = roundMoney(totalTaxAmount / 2);
+      const sgstAmount = roundMoney(totalTaxAmount - cgstAmount);
+      const calculatedTotal = roundMoney(subtotal + totalTaxAmount);
+
+      const totalPaidOnSub = hasSub && updatedSub.paidAmount !== undefined
+        ? roundMoney(Number(updatedSub.paidAmount))
+        : roundMoney(Number(targetInvoice?.amountPaid || 0) + numericAmount);
+
+      const description = hasSub
+        ? `${updatedSub.packageTier || 'CCTV'} Security Subscription Service`
+        : (note || 'CCTV Security Service Payment');
+
+      const invoiceItems = [
+        {
+          description,
+          hsnSac: '998529',
+          quantity: 1,
+          unitPrice: planGst.baseAmount,
+          amount: planGst.baseAmount,
+        }
+      ];
+
+      if (hasInstallation && installBase > 0) {
+        invoiceItems.push({
+          description: 'CCTV System One-Time Installation & Setup Charge',
+          hsnSac: installHsnSac,
+          quantity: 1,
+          unitPrice: installBase,
+          amount: installBase,
+        });
+      }
+
+      if (targetInvoice) {
+        if (hasSub && (targetInvoice.totalAmount < calculatedTotal || (hasInstallation && targetInvoice.items?.length === 1))) {
+          targetInvoice.subtotal = subtotal;
+          targetInvoice.taxPercentage = planGstRate;
+          targetInvoice.taxAmount = totalTaxAmount;
+          targetInvoice.cgstAmount = cgstAmount;
+          targetInvoice.sgstAmount = sgstAmount;
+          targetInvoice.totalAmount = calculatedTotal;
+          targetInvoice.items = invoiceItems;
+        }
 
         const newInvDue = roundMoney(Math.max(0, targetInvoice.totalAmount - totalPaidOnSub));
 
@@ -301,44 +417,27 @@ export class PaymentService extends BaseService {
         const seq = await getNextSequenceValue('invoiceNumber');
         const invNo = `INV-${new Date().getFullYear()}-${String(seq).padStart(5, '0')}`;
 
-        const hasSub = updatedSub && updatedSub.totalPlanPrice > 0;
-        const planTotal = hasSub ? roundMoney(updatedSub.totalPlanPrice) : numericAmount;
-        const totalPaidOnSub = hasSub ? roundMoney(updatedSub.paidAmount || numericAmount) : numericAmount;
-
-        const gst = extractGstFromInclusive(planTotal, planGstRate, false);
-        const amountDue = roundMoney(Math.max(0, planTotal - totalPaidOnSub));
+        const amountDue = roundMoney(Math.max(0, calculatedTotal - totalPaidOnSub));
         const invoiceStatus = amountDue <= 0 ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID;
 
         const dueDate = new Date(paidAtDate);
         dueDate.setDate(dueDate.getDate() + 7);
 
-        const description = hasSub
-          ? `${updatedSub.packageTier || 'CCTV'} Security Subscription Service`
-          : (note || 'CCTV Security Service Payment');
-
         targetInvoice = await InvoiceModel.create({
           invoiceNumber: invNo,
           clientId,
           subscriptionId: subscriptionId || null,
-          invoiceType: subscriptionId ? InvoiceType.RENEWAL : InvoiceType.CUSTOM,
+          invoiceType: hasInstallation ? InvoiceType.NEW_PLAN : (subscriptionId ? InvoiceType.RENEWAL : InvoiceType.CUSTOM),
           paymentTransactionId: payment._id,
-          items: [
-            {
-              description,
-              hsnSac: '998529',
-              quantity: 1,
-              unitPrice: gst.baseAmount,
-              amount: gst.baseAmount,
-            },
-          ],
+          items: invoiceItems,
           currency: 'INR',
-          subtotal: gst.baseAmount,
+          subtotal,
           taxPercentage: planGstRate,
-          taxAmount: gst.gstAmount,
-          cgstAmount: gst.cgstAmount,
-          sgstAmount: gst.sgstAmount,
+          taxAmount: totalTaxAmount,
+          cgstAmount,
+          sgstAmount,
           igstAmount: 0,
-          totalAmount: gst.totalAmount,
+          totalAmount: calculatedTotal,
           amountPaid: totalPaidOnSub,
           amountDue,
           status: invoiceStatus,

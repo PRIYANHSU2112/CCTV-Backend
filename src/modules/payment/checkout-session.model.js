@@ -77,6 +77,23 @@ const checkoutSessionSchema = new mongoose.Schema(
       type: Number,
       default: 1,
     },
+    installationCharge: {
+      type: Number,
+      default: 0,
+    },
+    installationHsnSac: {
+      type: String,
+      trim: true,
+      default: '995469',
+    },
+    installationGst: {
+      type: Number,
+      default: 0,
+    },
+    isNewSubscription: {
+      type: Boolean,
+      default: true,
+    },
     amountPaise: {
       type: Number,
       required: true,

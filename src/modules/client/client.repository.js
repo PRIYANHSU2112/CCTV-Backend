@@ -8,13 +8,17 @@ export class ClientRepository extends BaseRepository {
   }
 
   async findById(id) {
-    if (!id || typeof id !== 'string' || id.length !== 24) {
+    if (!id) {
+      return null;
+    }
+    const strId = String(id._id || id).trim();
+    if (strId.length !== 24 || !/^[a-fA-F0-9]{24}$/.test(strId)) {
       return null;
     }
     return this.model
-      .findById(id)
+      .findById(strId)
       .populate('userId', 'name phone email role status lastLogin')
-      .populate('currentSubscriptionId')
+      .populate({ path: 'currentSubscriptionId', populate: { path: 'planId' } })
       .exec();
   }
 
@@ -24,7 +28,7 @@ export class ClientRepository extends BaseRepository {
     if (!options.lean) {
       query
         .populate('userId', 'name phone email role status lastLogin')
-        .populate('currentSubscriptionId');
+        .populate({ path: 'currentSubscriptionId', populate: { path: 'planId' } });
     }
     return query.exec();
   }
@@ -46,18 +50,29 @@ export class ClientRepository extends BaseRepository {
         session: options.session,
       })
       .populate('userId', 'name phone email role status')
-      .populate('currentSubscriptionId')
+      .populate({ path: 'currentSubscriptionId', populate: { path: 'planId' } })
       .exec();
   }
 
   async updateStatus(id, status, options = {}) {
-    return this.model
+    let client = await this.model
       .findByIdAndUpdate(id, { $set: { status } }, {
         new: true,
         session: options.session,
       })
       .populate('userId', 'name phone email')
       .exec();
+
+    if (!client) {
+      client = await this.model
+        .findOneAndUpdate({ userId: id }, { $set: { status } }, {
+          new: true,
+          session: options.session,
+        })
+        .populate('userId', 'name phone email')
+        .exec();
+    }
+    return client;
   }
 
   async addCamera(id, cameraData) {
@@ -174,6 +189,28 @@ export class ClientRepository extends BaseRepository {
               subscriptionId: '$subscription._id',
               packageTier: '$subscription.packageTier',
               monthlyCharge: '$subscription.monthlyCharge',
+              paidAmount: {
+                $cond: {
+                  if: { $eq: ['$status', 'Approach Client'] },
+                  then: 0,
+                  else: { $ifNull: ['$subscription.paidAmount', 0] }
+                }
+              },
+              totalPlanPrice: '$subscription.totalPlanPrice',
+              remainingAmount: {
+                $cond: {
+                  if: { $eq: ['$status', 'Approach Client'] },
+                  then: { $ifNull: ['$subscription.totalPlanPrice', 0] },
+                  else: { $ifNull: ['$subscription.remainingAmount', 0] }
+                }
+              },
+              outstanding: {
+                $cond: {
+                  if: { $eq: ['$status', 'Approach Client'] },
+                  then: { $ifNull: ['$subscription.totalPlanPrice', 0] },
+                  else: { $ifNull: ['$subscription.remainingAmount', 0] }
+                }
+              },
               renewalDate: '$subscription.renewalDate',
               autoRenew: '$subscription.autoRenewal',
               createdAt: 1,
@@ -204,6 +241,7 @@ export class ClientRepository extends BaseRepository {
           due: [{ $match: { status: 'Due' } }, { $count: 'count' }],
           overdue: [{ $match: { status: 'Overdue' } }, { $count: 'count' }],
           suspended: [{ $match: { status: 'Suspended' } }, { $count: 'count' }],
+          approach: [{ $match: { status: 'Approach Client' } }, { $count: 'count' }],
           totalCameras: [{ $group: { _id: null, sum: { $sum: '$totalCamerasInstalled' } } }]
         }
       }
@@ -217,6 +255,7 @@ export class ClientRepository extends BaseRepository {
       dueClients: result?.due[0]?.count || 0,
       overdueClients: result?.overdue[0]?.count || 0,
       suspendedClients: result?.suspended[0]?.count || 0,
+      approachClients: result?.approach[0]?.count || 0,
       totalCameras: result?.totalCameras[0]?.sum || 0
     };
   }

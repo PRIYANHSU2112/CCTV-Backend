@@ -48,6 +48,23 @@ const clientSubscriptionSchema = new mongoose.Schema(
       type: Number,
       default: 1
     },
+    installationCharge: {
+      type: Number,
+      default: 0
+    },
+    installationHsnSac: {
+      type: String,
+      trim: true,
+      default: '995469'
+    },
+    installationGst: {
+      type: Number,
+      default: 0
+    },
+    isNewSubscription: {
+      type: Boolean,
+      default: true
+    },
     contractStartDate: {
       type: Date,
       required: [true, 'Contract start date is required']

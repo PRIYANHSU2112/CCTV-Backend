@@ -340,7 +340,7 @@ export class SubscriptionRepository extends BaseRepository {
   /**
    * KPI summary for Admin Subscriptions dashboard cards
    */
-  async getClientSubscriptionSummary() {
+  async getClientSubscriptionSummary(status = null) {
     const pipeline = [
       {
         $lookup: {
@@ -354,10 +354,23 @@ export class SubscriptionRepository extends BaseRepository {
       {
         $facet: {
           active: [{ $match: { status: 'ACTIVE' } }, { $count: 'count' }],
+          due: [{ $match: { status: 'DUE' } }, { $count: 'count' }],
           expired: [{ $match: { status: 'EXPIRED' } }, { $count: 'count' }],
           suspended: [{ $match: { status: 'SUSPENDED' } }, { $count: 'count' }],
+          cancelled: [{ $match: { status: 'CANCELLED' } }, { $count: 'count' }],
           autoRenewOn: [{ $match: { autoRenewal: true } }, { $count: 'count' }],
-          byBillingCycle: [
+          byStatusAndCycle: [
+            {
+              $group: {
+                _id: {
+                  status: '$status',
+                  billingCycle: { $ifNull: ['$plan.billingCycle', 'MONTHLY'] }
+                },
+                count: { $sum: 1 }
+              }
+            }
+          ],
+          byBillingCycleAll: [
             {
               $group: {
                 _id: { $ifNull: ['$plan.billingCycle', 'MONTHLY'] },
@@ -370,9 +383,6 @@ export class SubscriptionRepository extends BaseRepository {
     ];
 
     const [result] = await this.clientSubscriptionModel.aggregate(pipeline);
-    const cycleCounts = Object.fromEntries(
-      (result?.byBillingCycle || []).map((row) => [row._id, row.count])
-    );
 
     const cycleLabel = {
       MONTHLY: 'Monthly',
@@ -381,15 +391,47 @@ export class SubscriptionRepository extends BaseRepository {
       YEARLY: 'Yearly'
     };
 
+    const byStatusAndPlan = {
+      ACTIVE: { Monthly: 0, Quarterly: 0, 'Half-Yearly': 0, Yearly: 0 },
+      DUE: { Monthly: 0, Quarterly: 0, 'Half-Yearly': 0, Yearly: 0 },
+      EXPIRED: { Monthly: 0, Quarterly: 0, 'Half-Yearly': 0, Yearly: 0 },
+      SUSPENDED: { Monthly: 0, Quarterly: 0, 'Half-Yearly': 0, Yearly: 0 },
+      CANCELLED: { Monthly: 0, Quarterly: 0, 'Half-Yearly': 0, Yearly: 0 },
+      ALL: { Monthly: 0, Quarterly: 0, 'Half-Yearly': 0, Yearly: 0 }
+    };
+
+    (result?.byBillingCycleAll || []).forEach((row) => {
+      const label = cycleLabel[row._id] || 'Monthly';
+      byStatusAndPlan.ALL[label] = row.count;
+    });
+
+    (result?.byStatusAndCycle || []).forEach((row) => {
+      const st = String(row._id?.status || 'ACTIVE').toUpperCase();
+      const label = cycleLabel[row._id?.billingCycle] || 'Monthly';
+      if (!byStatusAndPlan[st]) {
+        byStatusAndPlan[st] = { Monthly: 0, Quarterly: 0, 'Half-Yearly': 0, Yearly: 0 };
+      }
+      byStatusAndPlan[st][label] = row.count;
+    });
+
+    const targetStatus = status ? String(status).toUpperCase() : null;
+    const selectedPlanCounts = (targetStatus && targetStatus !== 'ALL' && byStatusAndPlan[targetStatus])
+      ? byStatusAndPlan[targetStatus]
+      : byStatusAndPlan.ALL;
+
     return {
       active: result?.active?.[0]?.count || 0,
+      due: result?.due?.[0]?.count || 0,
       expired: result?.expired?.[0]?.count || 0,
       suspended: result?.suspended?.[0]?.count || 0,
+      cancelled: result?.cancelled?.[0]?.count || 0,
       autoRenewOn: result?.autoRenewOn?.[0]?.count || 0,
-      byPlan: ['MONTHLY', 'QUARTERLY', 'HALF_YEARLY', 'YEARLY'].map((cycle) => ({
-        plan: cycleLabel[cycle],
-        count: cycleCounts[cycle] || 0
-      }))
+      currentStatus: status || 'all',
+      byPlan: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'].map((plan) => ({
+        plan,
+        count: selectedPlanCounts[plan] || 0
+      })),
+      byStatusAndPlan
     };
   }
 }

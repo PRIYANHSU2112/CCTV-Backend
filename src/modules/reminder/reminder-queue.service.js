@@ -98,6 +98,45 @@ export class ReminderQueueService {
     await this.removeJob(jobId);
   }
 
+  /**
+   * Add chunked bulk reminder jobs to BullMQ (batches of 50)
+   */
+  async addBulkReminders(jobs) {
+    if (!jobs || !jobs.length) return [];
+    const chunkSize = 50;
+    const addedJobs = [];
+
+    for (let i = 0; i < jobs.length; i += chunkSize) {
+      const chunk = jobs.slice(i, i + chunkSize);
+      const bulkPayload = chunk.map((j) => {
+        const safeJobId = j.idempotencyKey
+          ? String(j.idempotencyKey).replace(/[:/]/g, '__')
+          : `bulk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+        return {
+          name: 'dispatch-reminder',
+          data: j,
+          opts: {
+            jobId: safeJobId,
+            attempts: 3,
+            backoff: {
+              type: 'exponential',
+              delay: 5000,
+            },
+            removeOnComplete: { age: 86400 * 3, count: 1000 },
+            removeOnFail: { age: 86400 * 7 },
+          },
+        };
+      });
+
+      const queued = await this.queue.addBulk(bulkPayload);
+      addedJobs.push(...queued);
+    }
+
+    logger.info(`📦 BullMQ enqueued ${addedJobs.length} bulk reminder jobs`);
+    return addedJobs;
+  }
+
   async close() {
     await this.queue.close();
   }

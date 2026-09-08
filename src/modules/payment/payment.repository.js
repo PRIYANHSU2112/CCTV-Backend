@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { BaseRepository } from '../../shared/bases/base.repository.js';
 import { PaymentTransactionModel } from './payment-transaction.model.js';
+import { PaymentMethod, PaymentStatus } from '../../shared/constants/enum.constant.js';
 
 export class PaymentRepository extends BaseRepository {
   constructor() {
@@ -14,8 +15,10 @@ export class PaymentRepository extends BaseRepository {
   }
 
   async findById(id, options = {}) {
-    if (!id || typeof id !== 'string' || id.length !== 24) return null;
-    const query = this.model.findById(id);
+    if (!id) return null;
+    const strId = String(id._id || id).trim();
+    if (strId.length !== 24 || !/^[a-fA-F0-9]{24}$/.test(strId)) return null;
+    const query = this.model.findById(strId);
     if (options.session) query.session(options.session);
     return query.exec();
   }
@@ -172,10 +175,30 @@ export class PaymentRepository extends BaseRepository {
           $facet: {
             totals: [
               {
+                $match: {
+                  status: PaymentStatus.PAID,
+                },
+              },
+              {
                 $group: {
                   _id: null,
                   totalAmount: { $sum: '$amount' },
                   count: { $sum: 1 },
+                },
+              },
+            ],
+            gateway: [
+              {
+                $match: {
+                  status: PaymentStatus.PAID,
+                  method: PaymentMethod.GATEWAY,
+                },
+              },
+              {
+                $group: {
+                  _id: null,
+                  count: { $sum: 1 },
+                  amount: { $sum: '$amount' },
                 },
               },
             ],
@@ -190,6 +213,11 @@ export class PaymentRepository extends BaseRepository {
             ],
             byMethod: [
               {
+                $match: {
+                  status: PaymentStatus.PAID,
+                },
+              },
+              {
                 $group: {
                   _id: '$method',
                   count: { $sum: 1 },
@@ -203,6 +231,7 @@ export class PaymentRepository extends BaseRepository {
       .allowDiskUse(true);
 
     const totals = result?.totals?.[0] || { totalAmount: 0, count: 0 };
+    const gateway = result?.gateway?.[0] || { count: 0, amount: 0 };
     const byStatus = {};
     for (const row of result?.byStatus || []) {
       byStatus[row._id] = { count: row.count, amount: row.amount };
@@ -212,9 +241,15 @@ export class PaymentRepository extends BaseRepository {
       byMethod[row._id] = { count: row.count, amount: row.amount };
     }
 
+    const totalPaidRevenue = Math.round((totals.totalAmount || 0) * 100) / 100;
+    const paidCollectionsCount = totals.count || 0;
+
     return {
-      totalAmount: Math.round((totals.totalAmount || 0) * 100) / 100,
-      count: totals.count || 0,
+      totalRevenue: totalPaidRevenue,
+      totalAmount: totalPaidRevenue,
+      paidCount: paidCollectionsCount,
+      totalCount: paidCollectionsCount,
+      gatewayCount: gateway.count || 0,
       byStatus,
       byMethod,
     };

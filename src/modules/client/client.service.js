@@ -18,8 +18,11 @@ import {
 } from '../../shared/utils/gstin.util.js';
 import { InvoiceModel } from '../invoice/invoice.model.js';
 import { PaymentTransactionModel } from '../payment/payment-transaction.model.js';
+import { CheckoutSessionModel } from '../payment/checkout-session.model.js';
 import { ReminderRuleModel } from '../reminder/reminder.model.js';
 import { ClientSubscriptionModel } from '../subscription/client-subscription.model.js';
+import { CompanyModel } from '../company/company.model.js';
+import { roundMoney } from '../../shared/utils/money.util.js';
 
 export class ClientService extends BaseService {
   constructor({ clientRepository, userRepository, hashService, subscriptionRepository = null, redisService }) {
@@ -167,16 +170,62 @@ export class ClientService extends BaseService {
       ? Number(planDoc.totalPrice)
       : Math.round(charge * months * (1 + planGstRate / 100) * 100) / 100;
 
+    // Resolve installation charge
+    let installBase = 0;
+    let installGst = 0;
+    let installHsnSac = '995469';
+
+    const shouldApplyInstallation = clientData.applyInstallationCharge !== undefined
+      ? Boolean(clientData.applyInstallationCharge)
+      : (clientData.installationCharge !== undefined && Number(clientData.installationCharge) > 0);
+
+    if (shouldApplyInstallation) {
+      let companyDoc = null;
+      try {
+        companyDoc = await CompanyModel.findOne().lean().exec();
+      } catch {
+        // Safe fallback
+      }
+
+      installBase = clientData.installationCharge !== undefined && clientData.installationCharge !== null
+        ? roundMoney(Number(clientData.installationCharge))
+        : Number(companyDoc?.installationCharge !== undefined ? companyDoc.installationCharge : (companyDoc?.financialDefaults?.installationCharge ?? 6000));
+
+      installHsnSac = clientData.installationHsnSac || companyDoc?.installationHsnSac || companyDoc?.financialDefaults?.installationHsnSac || '995469';
+
+      const installGstEnabled = companyDoc?.installationGstEnabled !== undefined
+        ? Boolean(companyDoc.installationGstEnabled)
+        : (companyDoc?.financialDefaults?.installationGstEnabled !== undefined
+            ? Boolean(companyDoc.financialDefaults.installationGstEnabled)
+            : true);
+
+      const installGstRate = Number(
+        companyDoc?.installationGstRate !== undefined
+          ? companyDoc.installationGstRate
+          : (companyDoc?.financialDefaults?.installationGstRate ?? 18)
+      );
+
+      installGst = clientData.installationGst !== undefined && clientData.installationGst !== null
+        ? roundMoney(Number(clientData.installationGst))
+        : (installGstEnabled ? roundMoney(installBase * (installGstRate / 100)) : 0);
+    }
+
+    const totalInstallationCharge = roundMoney(installBase + installGst);
+    const finalOrderPrice = roundMoney(totalPlanCharge + totalInstallationCharge);
+
     const subscription = await this.subscriptionRepository.createSubscription({
       clientId: user._id,
       planId: planDoc._id || planDoc.id,
       packageTier,
       cameraCount,
       monthlyCharge: charge,
-      totalPlanPrice: totalPlanCharge,
+      totalPlanPrice: finalOrderPrice,
+      installationCharge: installBase,
+      installationHsnSac: installHsnSac,
+      installationGst: installGst,
       gstPercentage: planGstRate,
       paidAmount: 0,
-      remainingAmount: totalPlanCharge,
+      remainingAmount: finalOrderPrice,
       durationInMonths: months,
       contractStartDate: startDate,
       renewalDate: computedRenewal,
@@ -315,7 +364,36 @@ export class ClientService extends BaseService {
       this.throwNotFound('Client');
     }
 
-    const clientObj = this.#mapClientDetail(client);
+    // Fallback: If subscription is missing or planId not populated, find the client's subscription
+    let fallbackSub = null;
+    const currentSub = client.currentSubscriptionId;
+    if (!currentSub || typeof currentSub !== 'object' || !currentSub.planId) {
+      try {
+        const clientMongoId = client._id || client.id;
+        const userMongoId = client.userId?._id || client.userId;
+        const idFilter = [];
+        if (currentSub && typeof currentSub !== 'object' && /^[a-fA-F0-9]{24}$/.test(String(currentSub))) {
+          idFilter.push({ _id: currentSub });
+        }
+        if (clientMongoId && /^[a-fA-F0-9]{24}$/.test(String(clientMongoId))) {
+          idFilter.push({ clientId: clientMongoId });
+        }
+        if (userMongoId && /^[a-fA-F0-9]{24}$/.test(String(userMongoId))) {
+          idFilter.push({ clientId: userMongoId });
+        }
+
+        if (idFilter.length) {
+          fallbackSub = await ClientSubscriptionModel.findOne({ $or: idFilter })
+            .populate('planId')
+            .sort({ createdAt: -1 })
+            .exec();
+        }
+      } catch {
+        // Safe fallback
+      }
+    }
+
+    const clientObj = this.#mapClientDetail(client, fallbackSub);
     try {
       await this.redisService.set(cacheKey, clientObj, SystemConstants.CACHE_TTL.SHORT);
     } catch {
@@ -325,66 +403,83 @@ export class ClientService extends BaseService {
     return clientObj;
   }
 
-
-
-  #mapClientDetail(client) {
+  #mapClientDetail(client, fallbackSub = null) {
     const raw = client.toJSON ? client.toJSON() : client;
     const user = raw.userId && typeof raw.userId === 'object' ? raw.userId : null;
-    const sub =
+    let sub =
       raw.currentSubscriptionId && typeof raw.currentSubscriptionId === 'object'
         ? raw.currentSubscriptionId
         : null;
 
-    const planGstRate = sub?.planId?.gstPercentage !== undefined
-      ? Number(sub.planId.gstPercentage)
+    if (!sub && fallbackSub) {
+      sub = fallbackSub.toJSON ? fallbackSub.toJSON() : fallbackSub;
+    }
+
+    const planDoc = sub?.planId && typeof sub.planId === 'object' ? sub.planId : null;
+    const rawPlanId =
+      planDoc?._id?.toString() ||
+      planDoc?.id?.toString() ||
+      (typeof sub?.planId === 'string' ? sub.planId : '') ||
+      (raw.planId ? String(raw.planId) : '');
+
+    const planGstRate = planDoc?.gstPercentage !== undefined
+      ? Number(planDoc.gstPercentage)
       : (sub?.gstPercentage !== undefined ? Number(sub.gstPercentage) : 0);
 
     const totalPlanPrice =
       sub?.totalPlanPrice !== undefined && sub?.totalPlanPrice !== null
         ? Number(sub.totalPlanPrice)
-        : (sub?.planId?.totalPrice !== undefined && sub?.planId?.totalPrice !== null
-            ? Number(sub.planId.totalPrice)
+        : (planDoc?.totalPrice !== undefined && planDoc?.totalPrice !== null
+            ? Number(planDoc.totalPrice)
             : (sub?.monthlyCharge ? Math.round(sub.monthlyCharge * (sub?.durationInMonths || 1) * (1 + planGstRate / 100) * 100) / 100 : 0));
-    const paidAmount = sub?.paidAmount !== undefined && sub?.paidAmount !== null
-      ? Number(sub.paidAmount)
-      : 0;
+    const isSuspended = raw.status === ClientStatus.SUSPENDED || raw.status === 'Suspended';
+    const isApproach = raw.status === ClientStatus.APPROACH_CLIENT || raw.status === 'Approach Client';
+    const rawPaid = sub?.paidAmount !== undefined && sub?.paidAmount !== null ? Number(sub.paidAmount) : 0;
+    const paidAmount = isApproach ? 0 : rawPaid;
     const calculatedRemaining = totalPlanPrice > 0
       ? Math.max(0, Math.round((totalPlanPrice - paidAmount) * 100) / 100)
       : 0;
-    const remainingAmount =
+    const remainingAmount = isApproach ? totalPlanPrice : (
       sub?.remainingAmount !== undefined && sub?.remainingAmount !== null && sub?.remainingAmount > 0
         ? Number(sub.remainingAmount)
-        : calculatedRemaining;
-    const isSubActivePaid = sub?.status === 'ACTIVE' && remainingAmount <= 0 && paidAmount >= totalPlanPrice && totalPlanPrice > 0;
+        : calculatedRemaining
+    );
+    const isSubActivePaid = !isSuspended && !isApproach && sub?.status === 'ACTIVE' && remainingAmount <= 0 && paidAmount >= totalPlanPrice && totalPlanPrice > 0;
+
+    const billingCycle = sub?.billingCycle || planDoc?.billingCycle || raw.billingCycle || raw.plan || 'MONTHLY';
+    const packageTier = sub?.packageTier || planDoc?.packageTier || raw.packageTier || 'BASIC';
+    const packageName = planDoc?.name || sub?.packageName || sub?.packageTier || raw.packageName || packageTier;
 
     return {
       id: raw.id || raw._id?.toString(),
-      name: user?.name || 'Contact Person',
-      businessName: raw.businessName,
-      email: raw.email || user?.email || 'N/A',
-      phone: user?.phone || 'N/A',
-      city: raw.installationAddress?.city || 'N/A',
-      address: raw.installationAddress?.address || 'N/A',
-      pincode: raw.installationAddress?.pincode || 'N/A',
-      state: raw.installationAddress?.state || 'Madhya Pradesh',
+      name: user?.name || raw.name || '',
+      businessName: raw.businessName || '',
+      email: raw.email || user?.email || '',
+      phone: user?.phone || raw.phone || '',
+      city: raw.installationAddress?.city || raw.city || '',
+      address: raw.installationAddress?.address || raw.address || '',
+      pincode: raw.installationAddress?.pincode || raw.pincode || '',
+      state: raw.installationAddress?.state || raw.state || 'Madhya Pradesh',
       gstin: raw.gstin || '',
       cameras: raw.totalCamerasInstalled || raw.cameras?.length || sub?.cameraCount || 0,
-      status: isSubActivePaid ? ClientStatus.ACTIVE : (raw.status || ClientStatus.ACTIVE),
-      plan: sub?.billingCycle || 'MONTHLY',
-      packageTier: sub?.packageTier || 'BASIC',
-      packageName: sub?.planId?.name || sub?.packageTier || 'BASIC',
-      planName: sub?.planId?.name || sub?.packageTier || 'BASIC',
-      durationInMonths: sub?.durationInMonths || sub?.planId?.durationInMonths || 1,
+      status: isSuspended ? ClientStatus.SUSPENDED : (isSubActivePaid ? ClientStatus.ACTIVE : (raw.status || ClientStatus.ACTIVE)),
+      planId: rawPlanId,
+      packageTier,
+      billingCycle,
+      plan: billingCycle,
+      packageName,
+      planName: packageName,
+      durationInMonths: sub?.durationInMonths || planDoc?.durationInMonths || 1,
       totalPlanPrice,
       paidAmount,
       remainingAmount,
-      monthlyCharge: sub?.monthlyCharge || 0,
+      monthlyCharge: sub?.monthlyCharge || planDoc?.basePrice || 0,
       planCharge: totalPlanPrice,
       renewalDate: sub?.renewalDate || null,
       nextDueDate: sub?.renewalDate || null,
       contractStart: sub?.contractStartDate || raw.createdAt || null,
       autoRenew: sub?.autoRenewal !== undefined ? sub.autoRenewal : true,
-      outstanding: isSubActivePaid ? 0 : remainingAmount,
+      outstanding: isSubActivePaid ? 0 : (isApproach ? totalPlanPrice : remainingAmount),
       createdAt: raw.createdAt,
       updatedAt: raw.updatedAt,
       userId: user?.id || user?._id || raw.userId,
@@ -430,24 +525,164 @@ export class ClientService extends BaseService {
       };
     }
 
+    // Update Subscription if subscription fields are supplied
+    const subUpdates = {};
+    if (updateData.planId) subUpdates.planId = updateData.planId;
+    if (updateData.packageTier) subUpdates.packageTier = updateData.packageTier;
+    if (updateData.billingCycle) subUpdates.billingCycle = updateData.billingCycle;
+    if (updateData.monthlyCharge !== undefined) subUpdates.monthlyCharge = Number(updateData.monthlyCharge);
+    if (updateData.renewalDate) subUpdates.renewalDate = new Date(updateData.renewalDate);
+    if (updateData.contractStart) subUpdates.contractStartDate = new Date(updateData.contractStart);
+    if (updateData.autoRenew !== undefined) subUpdates.autoRenewal = Boolean(updateData.autoRenew);
+
+    if (Object.keys(subUpdates).length > 0) {
+      try {
+        const clientMongoId = existing._id || existing.id;
+        const userMongoId = existing.userId?._id || existing.userId;
+        const idFilter = [];
+        if (existing.currentSubscriptionId && /^[a-fA-F0-9]{24}$/.test(String(existing.currentSubscriptionId))) {
+          idFilter.push({ _id: existing.currentSubscriptionId });
+        }
+        if (clientMongoId && /^[a-fA-F0-9]{24}$/.test(String(clientMongoId))) {
+          idFilter.push({ clientId: clientMongoId });
+        }
+        if (userMongoId && /^[a-fA-F0-9]{24}$/.test(String(userMongoId))) {
+          idFilter.push({ clientId: userMongoId });
+        }
+
+        if (idFilter.length) {
+          const updatedSub = await ClientSubscriptionModel.findOneAndUpdate(
+            { $or: idFilter },
+            { $set: subUpdates },
+            { new: true }
+          ).populate('planId');
+
+          if (updatedSub && !existing.currentSubscriptionId) {
+            clientUpdates.currentSubscriptionId = updatedSub._id;
+          }
+        }
+      } catch {
+        // Safe fallback
+      }
+    }
+
     const updatedClient = await this.clientRepository.update(id, clientUpdates);
+    if (clientUpdates.status) {
+      await this.#syncSubscriptionsOnClientStatusChange(updatedClient, clientUpdates.status);
+    }
+
     const clientObj = this.#mapClientDetail(updatedClient);
 
     await this.redisService.del(`client:${id}`);
     await this.redisService.del('client:stats');
+    await this.redisService.del('dashboard:kpis');
+    await this.redisService?.del?.('sub:summary');
 
     return clientObj;
   }
 
-  async updateClientStatus(id, status) {
+  #normalizeStatus(status) {
+    if (!status) return ClientStatus.ACTIVE;
+    const s = String(status).trim().toUpperCase();
+    if (s === 'ACTIVE') return ClientStatus.ACTIVE;
+    if (s === 'SUSPENDED') return ClientStatus.SUSPENDED;
+    if (s === 'APPROACH CLIENT' || s === 'APPROACH_CLIENT') return ClientStatus.APPROACH_CLIENT;
+    if (s === 'DUE') return ClientStatus.DUE;
+    if (s === 'OVERDUE') return ClientStatus.OVERDUE;
+    return status;
+  }
+
+  async #syncSubscriptionsOnClientStatusChange(client, status) {
+    if (!client || !status) return;
+
+    const normalizedStatus = String(status).trim().toUpperCase();
+    const isSuspended = normalizedStatus === 'SUSPENDED';
+    const isActive = normalizedStatus === 'ACTIVE';
+
+    if (!isSuspended && !isActive) return;
+
+    const clientMongoId = client._id || client.id;
+    const userMongoId = client.userId?._id || client.userId;
+
+    const idFilter = [];
+    if (clientMongoId) idFilter.push({ clientId: clientMongoId });
+    if (userMongoId) idFilter.push({ clientId: userMongoId });
+    if (client.currentSubscriptionId) idFilter.push({ _id: client.currentSubscriptionId });
+
+    if (!idFilter.length) return;
+
+    try {
+      if (isSuspended) {
+        // Automatically suspend all subscriptions of this client
+        await ClientSubscriptionModel.updateMany(
+          { $or: idFilter },
+          { $set: { status: SubscriptionStatus.SUSPENDED, suspendedAt: new Date() } }
+        );
+        if (userMongoId && this.userRepository?.updateStatus) {
+          await this.userRepository.updateStatus(userMongoId, UserStatus.SUSPENDED).catch(() => {});
+        }
+      } else if (isActive) {
+        // If activating/reactivating client, reactivate their suspended, cancelled, or pending subscriptions
+        await ClientSubscriptionModel.updateMany(
+          {
+            $or: idFilter,
+            status: {
+              $in: [
+                SubscriptionStatus.SUSPENDED,
+                SubscriptionStatus.CANCELLED,
+                SubscriptionStatus.PENDING_PAYMENT,
+                'SUSPENDED',
+                'CANCELLED',
+                'PENDING_PAYMENT',
+              ],
+            },
+          },
+          { $set: { status: SubscriptionStatus.ACTIVE, suspendedAt: null } }
+        );
+        if (userMongoId && this.userRepository?.updateStatus) {
+          await this.userRepository.updateStatus(userMongoId, UserStatus.ACTIVE).catch(() => {});
+        }
+
+        // If client had attempted/failed checkouts, mark them resolved by admin so auto-reconciliation ignores them
+        if (clientMongoId) {
+          await CheckoutSessionModel.updateMany(
+            { clientId: clientMongoId, status: { $in: ['FAILED', 'PENDING', 'EXPIRED'] } },
+            { $set: { status: 'CANCELLED', resolvedByAdmin: true } }
+          ).catch(() => {});
+        }
+      }
+
+      await this.redisService?.del?.('sub:summary');
+      if (userMongoId) {
+        await this.redisService?.del?.(`sub:client:${userMongoId}`);
+      }
+      await this.redisService?.del?.('dashboard:kpis');
+    } catch {
+      // Non-blocking
+    }
+  }
+
+  async updateClientStatus(id, rawStatus) {
+    const status = this.#normalizeStatus(rawStatus);
     const updatedClient = await this.clientRepository.updateStatus(id, status);
     if (!updatedClient) {
       this.throwNotFound('Client');
     }
 
+    // Persist isManuallyManaged flag to protect against automatic background reconciliation scripts
+    if (this.clientRepository?.model?.updateOne) {
+      await this.clientRepository.model.updateOne(
+        { _id: updatedClient._id || updatedClient.id },
+        { $set: { isManuallyManaged: true, status } }
+      ).catch(() => {});
+    }
+
+    await this.#syncSubscriptionsOnClientStatusChange(updatedClient, status);
+
     const clientObj = this.#mapClientDetail(updatedClient);
     await this.redisService.del(`client:${id}`);
     await this.redisService.del('client:stats');
+    await this.redisService.del('dashboard:kpis');
 
     return clientObj;
   }
@@ -494,6 +729,66 @@ export class ClientService extends BaseService {
     return { items, page, limit, total };
   }
 
+  async reconcileApproachClients() {
+    try {
+      const attemptedCheckouts = await CheckoutSessionModel.find({
+        status: { $in: ['FAILED', 'PENDING', 'EXPIRED'] },
+      }).select('clientId').lean();
+
+      if (!attemptedCheckouts.length) return;
+
+      const clientIds = [...new Set(attemptedCheckouts.map((co) => co.clientId?.toString()).filter(Boolean))];
+
+      for (const cid of clientIds) {
+        const hasPaidCheckout = await CheckoutSessionModel.exists({
+          clientId: cid,
+          status: 'PAID',
+        });
+        if (hasPaidCheckout) continue;
+
+        const hasPaidPayment = await PaymentTransactionModel.exists({
+          clientId: cid,
+          status: 'PAID',
+        });
+        if (hasPaidPayment) continue;
+
+        const client = await this.clientRepository.findById(cid);
+        if (
+          client &&
+          !client.isManuallyManaged &&
+          client.status !== ClientStatus.APPROACH_CLIENT &&
+          client.status !== ClientStatus.ACTIVE &&
+          client.status !== 'Active' &&
+          client.status !== ClientStatus.SUSPENDED &&
+          client.status !== 'Suspended'
+        ) {
+          await this.clientRepository.updateStatus(cid, ClientStatus.APPROACH_CLIENT);
+          await this.redisService?.del?.(`client:${cid}`);
+        }
+      }
+
+      // Ensure all subscriptions of suspended clients are automatically suspended
+      const suspendedClients = await this.clientRepository.model.find({
+        status: { $in: [ClientStatus.SUSPENDED, 'Suspended', 'SUSPENDED'] }
+      }).select('_id userId currentSubscriptionId').lean();
+
+      for (const sc of suspendedClients) {
+        const scFilter = [];
+        if (sc._id) scFilter.push({ clientId: sc._id });
+        if (sc.userId) scFilter.push({ clientId: sc.userId });
+        if (sc.currentSubscriptionId) scFilter.push({ _id: sc.currentSubscriptionId });
+        if (scFilter.length) {
+          await ClientSubscriptionModel.updateMany(
+            { $or: scFilter, status: { $ne: SubscriptionStatus.SUSPENDED } },
+            { $set: { status: SubscriptionStatus.SUSPENDED, suspendedAt: new Date() } }
+          );
+        }
+      }
+    } catch {
+      // Non-blocking auto reconciliation
+    }
+  }
+
   async getClientStats() {
     const cacheKey = 'client:stats';
     const cached = await this.redisService.get(cacheKey);
@@ -501,6 +796,7 @@ export class ClientService extends BaseService {
       return { ...cached, _cached: true };
     }
 
+    await this.reconcileApproachClients();
     const stats = await this.clientRepository.getClientStats();
     await this.redisService.set(cacheKey, stats, SystemConstants.CACHE_TTL.SHORT);
 
@@ -525,6 +821,34 @@ export class ClientService extends BaseService {
     if (clientMongoId) idFilter.push({ clientId: clientMongoId });
     if (userMongoId) idFilter.push({ clientId: userMongoId });
 
+    const isClientSuspended = clientObj.status === ClientStatus.SUSPENDED || clientObj.status === 'Suspended' || client.status === ClientStatus.SUSPENDED || client.status === 'Suspended';
+    const isClientActive = (clientObj.status === ClientStatus.ACTIVE || clientObj.status === 'Active' || client.status === ClientStatus.ACTIVE || client.status === 'Active') && !isClientSuspended;
+    const isSubApproach = clientObj.status === 'Approach Client' || client.status === 'Approach Client' || clientObj.status === ClientStatus.APPROACH_CLIENT || client.status === ClientStatus.APPROACH_CLIENT;
+
+    if (isClientSuspended && idFilter.length) {
+      ClientSubscriptionModel.updateMany(
+        { $or: idFilter, status: { $ne: SubscriptionStatus.SUSPENDED } },
+        { $set: { status: SubscriptionStatus.SUSPENDED, suspendedAt: new Date() } }
+      ).catch(() => {});
+    } else if (isClientActive && idFilter.length) {
+      ClientSubscriptionModel.updateMany(
+        {
+          $or: idFilter,
+          status: {
+            $in: [
+              SubscriptionStatus.SUSPENDED,
+              SubscriptionStatus.CANCELLED,
+              SubscriptionStatus.PENDING_PAYMENT,
+              'SUSPENDED',
+              'CANCELLED',
+              'PENDING_PAYMENT',
+            ],
+          },
+        },
+        { $set: { status: SubscriptionStatus.ACTIVE, suspendedAt: null } }
+      ).catch(() => {});
+    }
+
     // Fetch Invoices, Payments, Reminders, and Subscriptions concurrently
     const [rawInvoices, rawPayments, rawReminders, rawSubscriptions] = await Promise.all([
       InvoiceModel.find({ $or: idFilter }).sort({ createdAt: -1 }).lean().exec(),
@@ -540,16 +864,14 @@ export class ClientService extends BaseService {
       const planGstRate = planDoc.gstPercentage !== undefined
         ? Number(planDoc.gstPercentage)
         : (sub.gstPercentage !== undefined ? Number(sub.gstPercentage) : 0);
-      const totalPlanPrice = sub.totalPlanPrice || planDoc.totalPrice || (sub.monthlyCharge ? Math.round(sub.monthlyCharge * durationInMonths * (1 + planGstRate / 100) * 100) / 100 : 0);
-      const paidAmount = sub.paidAmount !== undefined && sub.paidAmount !== null
-        ? Number(sub.paidAmount)
-        : 0;
-      const calculatedRemaining = totalPlanPrice > 0
-        ? Math.max(0, Math.round((totalPlanPrice - paidAmount) * 100) / 100)
-        : 0;
-      const remainingAmount = sub.remainingAmount !== undefined && sub.remainingAmount !== null && sub.remainingAmount > 0
-        ? Number(sub.remainingAmount)
-        : calculatedRemaining;
+      const subPrice = Number(sub.totalPlanPrice || planDoc.totalPrice || (sub.monthlyCharge ? Math.round(sub.monthlyCharge * durationInMonths * (1 + planGstRate / 100) * 100) / 100 : 0));
+
+      const subPaymentsPaid = rawPayments
+        .filter((p) => String(p.subscriptionId) === String(sub._id) && p.status === 'PAID')
+        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+      const paidAmount = isSubApproach ? 0 : (subPaymentsPaid > 0 ? subPaymentsPaid : Number(sub.paidAmount || 0));
+      const remainingAmount = isSubApproach ? subPrice : Math.max(0, Math.round((subPrice - paidAmount) * 100) / 100);
 
       return {
         id: String(sub._id),
@@ -558,10 +880,15 @@ export class ClientService extends BaseService {
         packageName: planDoc.name || sub.packageTier || clientObj.packageName || 'CCTV Plan',
         packageTier: sub.packageTier,
         durationInMonths,
-        totalPlanPrice,
+        totalPlanPrice: subPrice,
         paidAmount,
         remainingAmount,
-        status: sub.status || 'ACTIVE',
+        installationCharge: Number(sub.installationCharge || 0),
+        installationGst: Number(sub.installationGst || 0),
+        installationHsnSac: sub.installationHsnSac || '995469',
+        status: isClientSuspended
+          ? SubscriptionStatus.SUSPENDED
+          : (isClientActive && (sub.status === SubscriptionStatus.SUSPENDED || sub.status === SubscriptionStatus.CANCELLED || sub.status === SubscriptionStatus.PENDING_PAYMENT) ? SubscriptionStatus.ACTIVE : (sub.status || 'ACTIVE')),
         startDate: sub.contractStartDate || sub.createdAt,
         renewalDate: sub.renewalDate,
         amount: Number(paidAmount),
@@ -571,10 +898,10 @@ export class ClientService extends BaseService {
     });
 
     const activeSub = subscriptions.find((s) => s.status === 'ACTIVE' || s.status === 'Active') || subscriptions[0];
-    const isFullyPaidActive = activeSub && (activeSub.status === 'ACTIVE' || activeSub.status === 'Active') && activeSub.remainingAmount <= 0 && activeSub.paidAmount >= activeSub.totalPlanPrice && activeSub.totalPlanPrice > 0;
+    const isFullyPaidActive = !isClientSuspended && activeSub && (activeSub.status === 'ACTIVE' || activeSub.status === 'Active') && activeSub.remainingAmount <= 0 && activeSub.paidAmount >= activeSub.totalPlanPrice && activeSub.totalPlanPrice > 0;
 
     // Auto-sync client status in DB to 'Active' if subscription is active & fully paid
-    if (isFullyPaidActive && (client.status === 'Due' || client.status === 'DUE' || client.status !== ClientStatus.ACTIVE)) {
+    if (!isClientSuspended && !isSubApproach && isFullyPaidActive && (client.status === 'Due' || client.status === 'DUE')) {
       clientObj.status = ClientStatus.ACTIVE;
       this.clientRepository.updateStatus(client._id || client.id, ClientStatus.ACTIVE).catch(() => {});
       try {
@@ -682,19 +1009,32 @@ export class ClientService extends BaseService {
       .filter((p) => p.status === 'PAID')
       .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-    const totalPaid = Math.round(Number(totalPaidFromPayments || (activeSub?.paidAmount ? activeSub.paidAmount : 0)) * 100) / 100;
+    const isApproach = clientObj.status === 'Approach Client' || client.status === 'Approach Client';
+
+    const totalPaid = isApproach
+      ? 0
+      : Math.round(Number(totalPaidFromPayments > 0 ? totalPaidFromPayments : (isFullyPaidActive ? (activeSub?.totalPlanPrice || 0) : (activeSub?.paidAmount || 0))) * 100) / 100;
 
     const invoiceOutstandingTotal = invoices
       .filter((inv) => ['UNPAID', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status))
       .reduce((sum, inv) => sum + Number(inv.balance || 0), 0);
 
-    const subRemaining = activeSub?.remainingAmount !== undefined && activeSub?.remainingAmount !== null
-      ? Number(activeSub.remainingAmount)
-      : invoiceOutstandingTotal;
+    const totalPlanCharge = Number(activeSub?.totalPlanPrice || clientObj.totalPlanPrice || clientObj.planCharge || 0);
 
-    const outstanding = isFullyPaidActive
-      ? 0
-      : Math.round(Number(subRemaining) * 100) / 100;
+    let calculatedOutstanding = 0;
+    if (isApproach) {
+      calculatedOutstanding = totalPlanCharge;
+    } else if (isFullyPaidActive || (totalPlanCharge > 0 && totalPaid >= totalPlanCharge)) {
+      calculatedOutstanding = 0;
+    } else {
+      calculatedOutstanding = Math.max(0, Math.round((totalPlanCharge - totalPaid) * 100) / 100);
+    }
+
+    if (invoiceOutstandingTotal > calculatedOutstanding) {
+      calculatedOutstanding = invoiceOutstandingTotal;
+    }
+
+    const outstanding = Math.round(Number(calculatedOutstanding) * 100) / 100;
 
     const paymentSuccessRate = payments.length
       ? Math.round((payments.filter((p) => p.status === 'PAID').length / payments.length) * 100)
@@ -722,6 +1062,8 @@ export class ClientService extends BaseService {
     return {
       client: {
         ...clientObj,
+        paidAmount: totalPaid,
+        remainingAmount: outstanding,
         outstanding,
       },
       kpis: {

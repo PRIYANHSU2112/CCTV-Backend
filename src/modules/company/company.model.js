@@ -48,7 +48,11 @@ const financialDefaultsSchema = new mongoose.Schema(
   {
     currency: { type: String, trim: true, default: 'INR' },
     timeZone: { type: String, trim: true, default: 'Asia/Kolkata' },
-    invoicePrefix: { type: String, trim: true, default: 'INV' }
+    invoicePrefix: { type: String, trim: true, default: 'INV' },
+    installationCharge: { type: Number, default: 6000, min: 0 },
+    installationHsnSac: { type: String, trim: true, default: '995469' },
+    installationGstEnabled: { type: Boolean, default: true },
+    installationGstRate: { type: Number, default: 18, min: 0, max: 100 }
   },
   { _id: false }
 );
@@ -131,13 +135,39 @@ const companySchema = new mongoose.Schema(
     financialDefaults: {
       type: financialDefaultsSchema,
       default: () => ({})
-    }
+    },
+    installationCharge: { type: Number, default: 6000, min: 0 },
+    installationHsnSac: { type: String, trim: true, default: '995469' },
+    installationGstEnabled: { type: Boolean, default: true },
+    installationGstRate: { type: Number, default: 18, min: 0, max: 100 },
+    tradeName: { type: String, trim: true, default: '' },
+    gstin: { type: String, trim: true, default: '' },
+    pan: { type: String, trim: true, default: '' },
+    tagline: { type: String, trim: true, default: '' },
+    bankName: { type: String, trim: true, default: '' },
+    bankAccount: { type: String, trim: true, default: '' },
+    bankIfsc: { type: String, trim: true, default: '' },
+    invoicePrefix: { type: String, trim: true, default: 'INV' },
+    logoDataUrl: { type: String, default: '' }
   },
   {
     timestamps: true,
     toJSON: {
       transform(doc, ret) {
         ret.id = ret._id.toString();
+        // Fallback for installation fields from financialDefaults if not set on root
+        if (ret.installationCharge === undefined && ret.financialDefaults?.installationCharge !== undefined) {
+          ret.installationCharge = ret.financialDefaults.installationCharge;
+        }
+        if (ret.installationHsnSac === undefined && ret.financialDefaults?.installationHsnSac !== undefined) {
+          ret.installationHsnSac = ret.financialDefaults.installationHsnSac;
+        }
+        if (ret.installationGstEnabled === undefined && ret.financialDefaults?.installationGstEnabled !== undefined) {
+          ret.installationGstEnabled = ret.financialDefaults.installationGstEnabled;
+        }
+        if (ret.installationGstRate === undefined && ret.financialDefaults?.installationGstRate !== undefined) {
+          ret.installationGstRate = ret.financialDefaults.installationGstRate;
+        }
         delete ret._id;
         delete ret.__v;
         return ret;
@@ -145,5 +175,9 @@ const companySchema = new mongoose.Schema(
     }
   }
 );
+
+// Performance indexes for single tenant queries and updates
+companySchema.index({ updatedAt: -1 });
+companySchema.index({ createdAt: -1 });
 
 export const CompanyModel = mongoose.models.Company || mongoose.model('Company', companySchema);

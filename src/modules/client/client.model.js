@@ -104,6 +104,15 @@ const clientSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'ClientSubscription',
       default: null
+    },
+    isManuallyManaged: {
+      type: Boolean,
+      default: false
+    },
+    notificationPreferences: {
+      whatsapp: { type: Boolean, default: true },
+      sms: { type: Boolean, default: true },
+      email: { type: Boolean, default: true }
     }
   },
   {

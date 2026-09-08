@@ -50,7 +50,11 @@ export const createClientSchema = Joi.object({
   packageName: Joi.string().trim().allow('', null),
   contractStart: Joi.date().iso().optional().allow('', null),
   renewalDate: Joi.date().iso().optional().allow('', null),
-  autoRenew: Joi.boolean().default(true)
+  autoRenew: Joi.boolean().default(true),
+  applyInstallationCharge: Joi.boolean().optional(),
+  installationCharge: Joi.number().min(0).optional().allow(null),
+  installationGst: Joi.number().min(0).optional().allow(null),
+  installationHsnSac: Joi.string().trim().optional().allow('', null),
 }).unknown(true);
 
 export const updateClientSchema = Joi.object({
@@ -76,9 +80,19 @@ export const addCameraSchema = Joi.object({
 });
 
 export const updateClientStatusSchema = Joi.object({
-  status: Joi.string().valid(...Object.values(ClientStatus)).required().messages({
-    'any.required': 'Client status is required'
-  })
+  status: Joi.string()
+    .valid(
+      ...Object.values(ClientStatus),
+      'ACTIVE',
+      'SUSPENDED',
+      'APPROACH_CLIENT',
+      'DUE',
+      'OVERDUE'
+    )
+    .required()
+    .messages({
+      'any.required': 'Client status is required'
+    })
 });
 
 export const getClientByIdSchema = Joi.object({
