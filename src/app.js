@@ -31,6 +31,7 @@ import { initCompanyModule } from './modules/company/index.js';
 import { initNotificationModule } from './modules/notification/index.js';
 import { initDashboardModule } from './modules/dashboard/index.js';
 import { initSearchModule } from './modules/search/index.js';
+import { initReportModule } from './modules/report/index.js';
 
 export const createApp = async () => {
   const app = express();
@@ -41,8 +42,60 @@ export const createApp = async () => {
   app.use(requestLoggerMiddleware);
 
   // 2. Production Security Controls
-  app.use(helmet());
-  app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    }),
+  );
+
+  const rawOrigins = typeof env.CORS_ORIGIN === 'string' ? env.CORS_ORIGIN : '*';
+  const allowedOrigins = rawOrigins.split(',').map((o) => o.trim()).filter(Boolean);
+
+  const corsOptions = {
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+
+      // If '*' wildcard is in allowed origins, reflect the origin to satisfy credentials: true
+      if (allowedOrigins.includes('*')) {
+        return callback(null, true);
+      }
+
+      // Check explicitly listed origins
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      // Check saburisecurity.in and any subdomain (e.g. admin.saburisecurity.in)
+      if (/^https?:\/\/([a-z0-9-]+\.)*saburisecurity\.in(:[0-9]+)?$/i.test(origin)) {
+        return callback(null, true);
+      }
+
+      // Check localhost and 127.0.0.1 for local development across all ports
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?$/i.test(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(null, false);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+    allowedHeaders: [
+      'Origin',
+      'X-Requested-With',
+      'Content-Type',
+      'Accept',
+      'Authorization',
+      'x-request-id',
+      'x-correlation-id',
+    ],
+    exposedHeaders: ['x-request-id', 'x-correlation-id', 'Content-Range'],
+    optionsSuccessStatus: 200,
+  };
+
+  app.use(cors(corsOptions));
+  app.options('*', cors(corsOptions));
   app.use(hpp());
   app.use(
     express.json({
@@ -77,6 +130,15 @@ export const createApp = async () => {
   });
   const clientModuleRouter = initClientModule(clientModuleContainer);
 
+  const invoiceModule = initInvoiceModule({
+    redisClient,
+    clientRepository: clientModuleContainer.resolve('clientRepository')
+  });
+
+  const pdfQueueService = (invoiceModule.container.hasRegistration?.('pdfQueueService') || invoiceModule.container.registrations?.pdfQueueService)
+    ? invoiceModule.container.resolve('pdfQueueService')
+    : null;
+
   const paymentModule = initPaymentModule({
     redisService,
     clientRepository: clientModuleContainer.resolve('clientRepository'),
@@ -84,12 +146,18 @@ export const createApp = async () => {
     userRepository: clientModuleContainer.resolve('userRepository'),
     hashService,
     postPaymentQueueService,
+    pdfQueueService,
   });
 
-  const invoiceModule = initInvoiceModule({
-    redisClient,
-    clientRepository: clientModuleContainer.resolve('clientRepository')
-  });
+  // In single-node / development setups, ensure post-payment workers process queue jobs
+  if (redisClient && process.env.START_EMBEDDED_WORKER !== 'false' && process.env.NODE_ENV !== 'test') {
+    try {
+      const { PostPaymentWorkers } = await import('./shared/queues/post-payment.workers.js');
+      new PostPaymentWorkers({ redisClient, pdfQueueService });
+    } catch {
+      // safe fallback
+    }
+  }
 
   const reminderModule = initReminderModule({
     redisClient,
@@ -107,6 +175,8 @@ export const createApp = async () => {
   const notificationModule = initNotificationModule();
 
   const dashboardModule = initDashboardModule({ redisService });
+
+  const reportModule = initReportModule({ redisService });
 
   const searchModule = initSearchModule({ redisService });
 
@@ -135,6 +205,7 @@ export const createApp = async () => {
   // 6. Mount Domain Module Routers
   app.use(`${env.API_PREFIX}`, healthModule.router);
   app.use(`${env.API_PREFIX}/dashboard`, dashboardModule.router);
+  app.use(`${env.API_PREFIX}/reports`, reportModule.router);
   app.use(`${env.API_PREFIX}/search`, searchModule.router);
   app.use(`${env.API_PREFIX}/users`, userModule.router);
   app.use(`${env.API_PREFIX}/rbac`, rbacModule.router);
